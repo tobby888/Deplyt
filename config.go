@@ -16,6 +16,7 @@ type config struct {
 	listenAddr string
 	token      string
 	production productionServer
+	archive    jarArchive
 }
 
 func loadConfig(path string) (config, error) {
@@ -52,7 +53,12 @@ func loadConfig(path string) (config, error) {
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
+	archive, err := newArchive(values)
+	if err != nil {
+		return config{}, err
+	}
 	return config{
+		archive:    archive,
 		listenAddr: addr,
 		token:      token,
 		production: productionServer{

@@ -16,10 +16,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
+	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -64,7 +67,7 @@ func TestRelayRejectsInvalidUploads(t *testing.T) {
 	}
 }
 
-func TestRelayDeploysThroughSSH(t *testing.T) {
+func TestRelayArchivesToOSSAndSwitchesThroughSSH(t *testing.T) {
 	var data bytes.Buffer
 	archive := zip.NewWriter(&data)
 	for _, name := range []string{
@@ -101,7 +104,7 @@ func TestRelayDeploysThroughSSH(t *testing.T) {
 	const password = "test $ssh # password"
 	configFile := filepath.Join(t.TempDir(), ".env")
 	port := listener.Addr().(*net.TCPAddr).Port
-	contents := fmt.Sprintf("DEPLOY_TOKEN=%s\nPRODUCTION_SSH_HOST=127.0.0.1\nPRODUCTION_SSH_PORT=%d\nPRODUCTION_SSH_PASSWORD='%s'\nPRODUCTION_SSH_HOST_KEY='%s'\n", testToken, port, password, bytes.TrimSpace(ssh.MarshalAuthorizedKey(key.PublicKey())))
+	contents := fmt.Sprintf("DEPLOY_TOKEN=%s\nPRODUCTION_SSH_HOST=127.0.0.1\nPRODUCTION_SSH_PORT=%d\nPRODUCTION_SSH_PASSWORD='%s'\nPRODUCTION_SSH_HOST_KEY='%s'\nOSS_REGION=cn-hangzhou\nOSS_BUCKET=photolib-test\nOSS_ACCESS_KEY_ID=test-key\nOSS_ACCESS_KEY_SECRET=test-secret\n", testToken, port, password, bytes.TrimSpace(ssh.MarshalAuthorizedKey(key.PublicKey())))
 	if err := os.WriteFile(configFile, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -118,9 +121,27 @@ func TestRelayDeploysThroughSSH(t *testing.T) {
 	}}
 	server.AddHostKey(key)
 	result := make(chan error, 1)
-	go func() { result <- verifySSHDeployment(listener, server, data.Bytes()) }()
+	digest := fmt.Sprintf("%x", sha256.Sum256(data.Bytes()))
+	tcp := listener.(*net.TCPListener)
+	_ = tcp.SetDeadline(time.Now().Add(5 * time.Second))
+	go func() { result <- verifySSHDeployment(listener, server, digest) }()
 
-	handler := &relay{token: cfg.token, maxSize: maxJARSize, logger: slog.New(slog.DiscardHandler), deploy: cfg.production.deploy}
+	cfg.archive.client = oss.NewClient(oss.LoadDefaultConfig().WithRegion("cn-hangzhou").
+		WithUseAccelerateEndpoint(true).
+		WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test-key", "test-secret")).
+		WithHttpClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(r.Body)
+			if r.Method != http.MethodPut || r.URL.Host != "photolib-test.oss-accelerate.aliyuncs.com" ||
+				!strings.HasPrefix(r.URL.Path, "/"+archivePrefix+"photolib-backend-12345-") ||
+				!strings.HasSuffix(r.URL.Path, "-"+digest+".jar") ||
+				r.Header.Get("x-oss-meta-sha256") != digest || r.Header.Get("x-oss-forbid-overwrite") != "true" ||
+				r.Header.Get("x-oss-object-acl") != "private" || !bytes.Equal(body, data.Bytes()) || err != nil {
+				t.Errorf("unexpected OSS upload: %s %s", r.Method, r.URL)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+		})}))
+	handler := &relay{token: cfg.token, maxSize: maxJARSize, logger: slog.New(slog.DiscardHandler),
+		archive: cfg.archive.upload, downloadURL: cfg.archive.downloadURL, deploy: cfg.production.deploy}
 	response := httptest.NewRecorder()
 	handler.handleDeploy(response, deploymentRequest(data.Bytes()))
 	if err := <-result; err != nil {
@@ -131,21 +152,35 @@ func TestRelayDeploysThroughSSH(t *testing.T) {
 	}
 }
 
-func verifySSHDeployment(listener net.Listener, server *ssh.ServerConfig, jar []byte) error {
-	var runID string
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func verifySSHDeployment(listener net.Listener, server *ssh.ServerConfig, digest string) error {
+	var runID, jarName string
 	if err := expectSSHCommand(listener, server, func(command string, body []byte) error {
 		match := regexp.MustCompile(`\.upload-([A-Za-z0-9-]+)\.jar`).FindStringSubmatch(command)
-		if len(match) != 2 || !strings.HasPrefix(match[1], "12345-") || !strings.Contains(command, fmt.Sprintf("%x", sha256.Sum256(jar))) || !bytes.Equal(body, jar) {
-			return fmt.Errorf("unexpected JAR transfer: %q", command)
+		if len(match) != 2 || !strings.HasPrefix(match[1], "12345-") || !strings.Contains(command, digest) ||
+			!strings.Contains(command, "curl -q") || strings.Contains(command, "Signature") {
+			return fmt.Errorf("unexpected download command: %q", command)
 		}
 		runID = match[1]
+		url, err := strconv.Unquote(strings.TrimSpace(strings.TrimPrefix(string(body), "url = ")))
+		if err != nil || !strings.HasPrefix(url, "https://photolib-test.oss-accelerate.aliyuncs.com/"+archivePrefix) ||
+			!strings.Contains(url, "x-oss-signature=") {
+			return fmt.Errorf("expected presigned OSS URL on SSH stdin")
+		}
+		jarName = "photolib-backend-" + strings.TrimSuffix(runID, "-1") + "-" + digest + ".jar"
+		if !strings.Contains(url, "/"+archivePrefix+jarName+"?") {
+			return fmt.Errorf("download name does not match deployment name")
+		}
 		return nil
 	}); err != nil {
 		_ = listener.Close()
 		return err
 	}
 	return expectSSHCommand(listener, server, func(command string, body []byte) error {
-		want := fmt.Sprintf("DEPLOY_DIR='/opt/Photolib' JAR_NAME='%s' RUN_ID='%s' bash -s", testJARName, runID)
+		want := fmt.Sprintf("DEPLOY_DIR='/opt/Photolib' JAR_NAME='%s' RUN_ID='%s' bash -s", jarName, runID)
 		if command != want || string(body) != restartScript {
 			return fmt.Errorf("unexpected restart: %q", command)
 		}

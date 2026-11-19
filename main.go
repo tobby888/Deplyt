@@ -32,10 +32,12 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	relay := &relay{
-		token:   cfg.token,
-		deploy:  cfg.production.deploy,
-		logger:  logger,
-		maxSize: maxJARSize,
+		token:       cfg.token,
+		deploy:      cfg.production.deploy,
+		archive:     cfg.archive.upload,
+		downloadURL: cfg.archive.downloadURL,
+		logger:      logger,
+		maxSize:     maxJARSize,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {

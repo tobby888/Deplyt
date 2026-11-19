@@ -5,12 +5,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestPairedPhotoLibAccountRequiresDeplytGrant(t *testing.T) {
+	const memberID = int64(2012345678901234567)
+	memberIDText := strconv.FormatInt(memberID, 10)
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var data any
 		switch r.URL.Path {
@@ -26,7 +29,8 @@ func TestPairedPhotoLibAccountRequiresDeplytGrant(t *testing.T) {
 			if r.Header.Get("Authorization") != "Bearer access" {
 				t.Error("missing PhotoLib access token")
 			}
-			data = photoLibUser{ID: 27, Username: "member"}
+			// PhotoLib emits Snowflake IDs above JavaScript's safe integer range as strings.
+			data = map[string]string{"id": memberIDText, "username": "member"}
 		default:
 			http.NotFound(w, r)
 			return
@@ -86,7 +90,7 @@ func TestPairedPhotoLibAccountRequiresDeplytGrant(t *testing.T) {
 	result := post("/auth/pairing/finish", origin, login.Result().Cookies()[0], http.StatusOK)
 	member := result.Result().Cookies()[1]
 	post("/api/deployments/workflow", origin, member, http.StatusForbidden)
-	post("/api/access/27/grant", origin, member, http.StatusForbidden)
+	post("/api/access/"+memberIDText+"/grant", origin, member, http.StatusForbidden)
 
 	adminPage := httptest.NewRecorder()
 	if !auth.setSession(adminPage, httptest.NewRequest(http.MethodGet, "/", nil),
@@ -95,15 +99,15 @@ func TestPairedPhotoLibAccountRequiresDeplytGrant(t *testing.T) {
 	}
 	admin := adminPage.Result().Cookies()[0]
 	post("/api/access/999/grant", origin, admin, http.StatusNotFound)
-	post("/api/access/27/grant", origin, admin, http.StatusNoContent)
+	post("/api/access/"+memberIDText+"/grant", origin, admin, http.StatusNoContent)
 	res := post("/api/deployments/workflow", origin, member, http.StatusAccepted)
 	if !strings.Contains(res.Body.String(), "/actions/runs/1234") {
 		t.Fatalf("missing run link: %s", res.Body)
 	}
 	reloaded, err := openAccessRegistry(dir, provider.URL, 11)
-	if err != nil || !reloaded.allowed(27) {
+	if err != nil || !reloaded.allowed(memberID) {
 		t.Fatalf("grant did not survive restart: %v", err)
 	}
-	post("/api/access/27/revoke", origin, admin, http.StatusNoContent)
+	post("/api/access/"+memberIDText+"/revoke", origin, admin, http.StatusNoContent)
 	post("/api/deployments/workflow", origin, member, http.StatusForbidden)
 }

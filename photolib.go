@@ -101,13 +101,20 @@ func (p photoLibClient) call(ctx context.Context, path string, input any, bearer
 }
 
 func (p photoLibClient) user(ctx context.Context, accessToken string) (photoLibUser, error) {
-	var user photoLibUser
-	if err := p.call(ctx, "/me", nil, accessToken, &user); err != nil {
+	var response struct {
+		photoLibUser
+		// PhotoLib sends IDs above JavaScript's safe integer range as decimal strings.
+		ID json.Number `json:"id"`
+	}
+	if err := p.call(ctx, "/me", nil, accessToken, &response); err != nil {
 		return photoLibUser{}, err
 	}
-	if user.ID <= 0 || user.Username == "" || user.MustChangePassword || user.MFA.EnrollmentRequired {
+	user := response.photoLibUser
+	id, err := response.ID.Int64()
+	if err != nil || id <= 0 || user.Username == "" || user.MustChangePassword || user.MFA.EnrollmentRequired {
 		return photoLibUser{}, errPhotoLibSession
 	}
+	user.ID = id
 	return user, nil
 }
 

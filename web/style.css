@@ -14,7 +14,34 @@ body { margin: 0; }
 .brand small { display: block; color: #455a71; }
 main { padding-block: clamp(1.5rem, 5vw, 3rem); }
 .panel { padding: clamp(1.15rem, 4vw, 2rem); border: 1px solid #dbe4ee; border-radius: .9rem; background: #fff; }
+.panel + .panel { margin-top: 1rem; }
 h1 { font-size: clamp(1.35rem, 5vw, 1.75rem); margin: 0; }
+h2 { font-size: 1.16rem; margin: 0; }
 p { margin: .75rem 0 1rem; color: #455a71; }
 p:last-child { margin-bottom: 0; }
 a { color: #245984; }
+button, .button {
+  display: inline-block;
+  border: 1px solid #245984;
+  border-radius: .45rem;
+  background: #245984;
+  color: #fff;
+  padding: .55rem .8rem;
+  font: inherit;
+  font-size: .92rem;
+  font-weight: 650;
+  text-decoration: none;
+  cursor: pointer;
+}
+button:hover, .button:hover { background: #19466b; }
+.secondary { background: #fff; color: #245984; border-color: #a4bbcf; }
+.secondary:hover { background: #eaf1f7; }
+.account-menu, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
+.account-menu { margin-left: auto; justify-content: flex-end; overflow-wrap: anywhere; }
+.pairing-code code { color: #182a3e; font-size: 1.45rem; letter-spacing: .08em; }
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; margin-top: .75rem; text-align: left; }
+th, td { padding: .7rem .5rem; border-bottom: 1px solid #dbe4ee; vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+td small { display: block; color: #455a71; overflow-wrap: anywhere; }
+td form { white-space: nowrap; }

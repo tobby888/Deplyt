@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -18,6 +19,8 @@ type config struct {
 	token          string
 	production     productionServer
 	photoLibOrigin string
+	adminID        int64
+	stateDir       string
 }
 
 func loadConfig(path string) (config, error) {
@@ -62,10 +65,26 @@ func loadConfig(path string) (config, error) {
 		}
 		origin = "https://" + strings.ToLower(site.Host)
 	}
+	var adminID int64
+	if setting := values["DEPLOY_ADMIN_PHOTOLIB_ID"]; setting != "" {
+		adminID, err = strconv.ParseInt(setting, 10, 64)
+		if err != nil || adminID <= 0 || origin == "" {
+			return config{}, errors.New("DEPLOY_ADMIN_PHOTOLIB_ID requires a positive PhotoLib user ID and PHOTOLIB_BASE_URL")
+		}
+	}
+	stateDir := values["DEPLOY_STATE_DIR"]
+	if stateDir == "" {
+		stateDir = os.Getenv("STATE_DIRECTORY")
+	}
+	if stateDir == "" {
+		stateDir = "state"
+	}
 	return config{
 		listenAddr:     addr,
 		token:          token,
 		photoLibOrigin: origin,
+		adminID:        adminID,
+		stateDir:       stateDir,
 		production: productionServer{
 			address:  net.JoinHostPort(values["PRODUCTION_SSH_HOST"], port),
 			user:     user,

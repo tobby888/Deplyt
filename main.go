@@ -40,26 +40,30 @@ func run(logger *slog.Logger) error {
 	mux := http.NewServeMux()
 	registerWebAssets(mux, &branding{
 		origin: cfg.photoLibOrigin,
-		client: &http.Client{
-			Timeout: 3 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		client: outboundClient(3 * time.Second),
 	})
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
-		renderPage(w, http.StatusOK, page{
-			Title:   "PhotoLib 部署",
-			Message: "通过 Deplyt 将 PhotoLib 发布到生产环境。",
+	if cfg.adminID != 0 {
+		access, err := openAccessRegistry(cfg.stateDir, cfg.photoLibOrigin, cfg.adminID)
+		if err != nil {
+			return err
+		}
+		photoLib := photoLibClient{origin: cfg.photoLibOrigin, http: outboundClient(8 * time.Second)}
+		newConsole(photoLib, access, logger).register(mux)
+	} else {
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
+			renderPage(w, http.StatusServiceUnavailable, page{
+				Title:   "控制台待配置",
+				Message: "请设置 PhotoLib 站点和 Deplyt 管理员账号。",
+			})
 		})
-	})
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /v1/deploy/photolib", relay.handleDeploy)
 	server := &http.Server{
 		Addr:              cfg.listenAddr,
-		Handler:           mux,
+		Handler:           http.NewCrossOriginProtection().Handler(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       uploadTimeout,
 		WriteTimeout:      responseTimeout,

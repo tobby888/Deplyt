@@ -54,7 +54,7 @@ func run(logger *slog.Logger) error {
 		logger:  logger,
 		maxSize: maxJARSize,
 	}
-	if cfg.archive.client != nil {
+	if cfg.archive.uploadClient != nil {
 		relay.archive = cfg.archive.upload
 		relay.downloadURL = cfg.archive.downloadURL
 	}

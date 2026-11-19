@@ -15,8 +15,50 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"golang.org/x/crypto/ssh"
 )
+
+func TestOSSProductionEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name, endpoint, productionHost string
+	}{
+		{"defaults to the regional public endpoint", "", "photolib-test.oss-cn-hangzhou.aliyuncs.com"},
+		{"uses the configured internal endpoint", "https://oss-cn-hangzhou-internal.aliyuncs.com/", "photolib-test.oss-cn-hangzhou-internal.aliyuncs.com"},
+		{"rejects acceleration", "https://oss-accelerate.aliyuncs.com", ""},
+		{"rejects bucket acceleration", "https://photolib-test.oss-accelerate-overseas.aliyuncs.com", ""},
+		{"rejects HTTP", "http://oss-cn-hangzhou.aliyuncs.com", ""},
+		{"rejects object paths", "https://oss-cn-hangzhou.aliyuncs.com/object", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			archive, err := newArchive(map[string]string{
+				"OSS_BUCKET": "photolib-test", "OSS_REGION": "cn-hangzhou",
+				"OSS_ACCESS_KEY_ID": "test-key", "OSS_ACCESS_KEY_SECRET": "test-secret",
+				"OSS_PRODUCTION_ENDPOINT": tc.endpoint,
+			})
+			if tc.productionHost == "" {
+				if err == nil || !strings.Contains(err.Error(), "OSS_PRODUCTION_ENDPOINT") {
+					t.Fatalf("expected a production endpoint configuration error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := archivePrefix + testJARName
+			download, err := archive.downloadURL(t.Context(), key)
+			if err != nil || !strings.HasPrefix(download, "https://"+tc.productionHost+"/"+key+"?") {
+				t.Fatalf("expected a download URL on %s, got %v", tc.productionHost, err)
+			}
+			upload, err := archive.uploadClient.Presign(t.Context(), &oss.PutObjectRequest{
+				Bucket: oss.Ptr("photolib-test"), Key: oss.Ptr(key),
+			})
+			if err != nil || !strings.HasPrefix(upload.URL, "https://photolib-test.oss-accelerate.aliyuncs.com/"+key+"?") {
+				t.Fatalf("expected an accelerated upload URL, got %v", err)
+			}
+		})
+	}
+}
 
 func TestOSSPresignedDownloadAndRedirectRejection(t *testing.T) {
 	const query = "x-oss-signature=test%2Bsignature&x-oss-security-token=test-token"

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
@@ -13,8 +14,9 @@ import (
 const archivePrefix = "deplyt/photolib/"
 
 type jarArchive struct {
-	client *oss.Client
-	bucket string
+	uploadClient     *oss.Client
+	productionClient *oss.Client
+	bucket           string
 }
 
 func newArchive(values map[string]string) (jarArchive, error) {
@@ -22,6 +24,19 @@ func newArchive(values map[string]string) (jarArchive, error) {
 		if values[key] == "" {
 			return jarArchive{}, fmt.Errorf("%s is required", key)
 		}
+	}
+	productionEndpoint := values["OSS_PRODUCTION_ENDPOINT"]
+	if productionEndpoint != "" {
+		origin, err := httpsOrigin(productionEndpoint)
+		if err != nil {
+			return jarArchive{}, errors.New("OSS_PRODUCTION_ENDPOINT must be an HTTPS origin")
+		}
+		for label := range strings.SplitSeq(strings.TrimPrefix(origin, "https://"), ".") {
+			if label == "oss-accelerate" || label == "oss-accelerate-overseas" {
+				return jarArchive{}, errors.New("OSS_PRODUCTION_ENDPOINT must not use an OSS transfer acceleration endpoint")
+			}
+		}
+		productionEndpoint = origin
 	}
 	id, secret, role := values["OSS_ACCESS_KEY_ID"], values["OSS_ACCESS_KEY_SECRET"], values["OSS_ECS_RAM_ROLE"]
 	var provider credentials.CredentialsProvider
@@ -38,9 +53,13 @@ func newArchive(values map[string]string) (jarArchive, error) {
 	}
 	cfg := oss.LoadDefaultConfig().
 		WithRegion(values["OSS_REGION"]).
-		WithUseAccelerateEndpoint(true).
 		WithCredentialsProvider(provider)
-	return jarArchive{client: oss.NewClient(cfg), bucket: values["OSS_BUCKET"]}, nil
+	uploadConfig := *cfg
+	return jarArchive{
+		uploadClient:     oss.NewClient(uploadConfig.WithUseAccelerateEndpoint(true)),
+		productionClient: oss.NewClient(cfg.WithEndpoint(productionEndpoint)),
+		bucket:           values["OSS_BUCKET"],
+	}, nil
 }
 
 func (a jarArchive) upload(ctx context.Context, key, sha256 string, file *os.File) error {
@@ -48,7 +67,7 @@ func (a jarArchive) upload(ctx context.Context, key, sha256 string, file *os.Fil
 	if err != nil {
 		return err
 	}
-	_, err = a.client.PutObject(ctx, &oss.PutObjectRequest{
+	_, err = a.uploadClient.PutObject(ctx, &oss.PutObjectRequest{
 		Bucket:          oss.Ptr(a.bucket),
 		Key:             oss.Ptr(key),
 		ContentLength:   oss.Ptr(info.Size()),
@@ -62,7 +81,7 @@ func (a jarArchive) upload(ctx context.Context, key, sha256 string, file *os.Fil
 }
 
 func (a jarArchive) downloadURL(ctx context.Context, key string) (string, error) {
-	result, err := a.client.Presign(ctx, &oss.GetObjectRequest{Bucket: oss.Ptr(a.bucket), Key: oss.Ptr(key)},
+	result, err := a.productionClient.Presign(ctx, &oss.GetObjectRequest{Bucket: oss.Ptr(a.bucket), Key: oss.Ptr(key)},
 		func(options *oss.PresignOptions) { options.Expires = deployTimeout })
 	if err != nil {
 		return "", err

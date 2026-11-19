@@ -39,6 +39,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 | `PRODUCTION_SSH_HOST_KEY` | 从可信渠道取得的生产机 SSH host 公钥整行，例如读取生产机的 `/etc/ssh/ssh_host_ed25519_key.pub` 后用单引号包住内容。SSH 握手会固定校验该公钥。 |
 | `OSS_BUCKET` | PhotoLib 当前使用的私有 Bucket。 |
 | `OSS_REGION` | Bucket 所在地域，例如 `cn-hangzhou`。 |
+| `OSS_PRODUCTION_ENDPOINT` | 生产机下载归档时使用的 HTTPS 地域 Endpoint，例如 `https://oss-cn-hangzhou-internal.aliyuncs.com`。填不含 Bucket 名的地址。留空时使用 `OSS_REGION` 对应的普通公网 Endpoint。 |
 | `OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` | Deplyt 专用 RAM 凭据，仅需访问下述 JAR 前缀。 |
 | `OSS_ECS_RAM_ROLE` | 在阿里云 ECS 上部署时，可填实例绑定的 RAM 角色名。SDK 自动取得并更新临时凭据。此模式无需填写 AccessKey。 |
 | `DEPLYT_PUBLIC_URL`、`PHOTOLIB_PUBLIC_URL` | Deplyt 和 PhotoLib 的 HTTPS 源地址，例如 `https://deploy.example.com`，带非默认端口时需填写端口。 |
@@ -52,7 +53,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 
 配置归档凭据后，CI 和手动 OSS 部署都会将校验通过的 JAR 归档到私有 OSS，随后通过 SSH 让生产机使用签名 URL 下载。生产机会重新校验 SHA-256，再切换 JAR、重启服务并检查 systemd 状态。
 
-1. 为共享 Bucket 开启[传输加速](https://www.alibabacloud.com/help/en/oss/user-guide/transfer-acceleration)。Deplyt 使用 `<bucket>.oss-accelerate.aliyuncs.com` 上传与签名，两个服务器均需能访问该地址。PhotoLib 继续使用原有 OSS 配置。
+1. 为共享 Bucket 开启[传输加速](https://www.alibabacloud.com/help/en/oss/user-guide/transfer-acceleration)。中转机使用 `<bucket>.oss-accelerate.aliyuncs.com` 上传。部署和回滚的签名下载链接使用 `OSS_PRODUCTION_ENDPOINT` 对应的地址，由生产机访问。同地域的阿里云 ECS 可配置 [OSS 内网 Endpoint](https://help.aliyun.com/en/oss/user-guide/access-oss-via-bucket-domain-name)。
 2. 仅授予 Deplyt 凭据对 `deplyt/photolib/*` 的 `oss:PutObject` 和 `oss:GetObject`。确保 Bucket 生命周期规则对该前缀永久保留，且不会转到需要解冻的存储类型。
 3. 对象键为 `deplyt/photolib/photolib-backend-<run-id>-<部署记录ID>-<完整sha256>.jar`。每次 CI 上传分配独立 ID，重跑也会保留自己的归档。对象按私有 ACL 写入。部署失败或回滚都保留已上传的对象。
 4. 生产机需提供 `curl`、`bash`、`sha256sum`、`flock`、现有的 `maint-on`、`maint-off` 和 `photolib.service`。目录 `/opt/Photolib` 应仅有一个匹配 `photolib-backend-*.jar` 的运行包。切换过程中临时把旧包移出匹配范围，新服务启动失败时尝试恢复旧包。

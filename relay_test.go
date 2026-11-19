@@ -109,7 +109,7 @@ func TestRelayArchivesToOSSAndSwitchesThroughSSH(t *testing.T) {
 	const password = "test $ssh # password"
 	configFile := filepath.Join(t.TempDir(), ".env")
 	port := listener.Addr().(*net.TCPAddr).Port
-	contents := fmt.Sprintf("DEPLOY_TOKEN=%s\nPRODUCTION_SSH_HOST=127.0.0.1\nPRODUCTION_SSH_PORT=%d\nPRODUCTION_SSH_PASSWORD='%s'\nPRODUCTION_SSH_HOST_KEY='%s'\nOSS_REGION=cn-hangzhou\nOSS_BUCKET=photolib-test\nOSS_ACCESS_KEY_ID=test-key\nOSS_ACCESS_KEY_SECRET=test-secret\n", testToken, port, password, bytes.TrimSpace(ssh.MarshalAuthorizedKey(key.PublicKey())))
+	contents := fmt.Sprintf("DEPLOY_TOKEN=%s\nPRODUCTION_SSH_HOST=127.0.0.1\nPRODUCTION_SSH_PORT=%d\nPRODUCTION_SSH_PASSWORD='%s'\nPRODUCTION_SSH_HOST_KEY='%s'\nOSS_REGION=cn-hangzhou\nOSS_BUCKET=photolib-test\nOSS_PRODUCTION_ENDPOINT=https://oss-cn-hangzhou-internal.aliyuncs.com\nOSS_ACCESS_KEY_ID=test-key\nOSS_ACCESS_KEY_SECRET=test-secret\n", testToken, port, password, bytes.TrimSpace(ssh.MarshalAuthorizedKey(key.PublicKey())))
 	if err := os.WriteFile(configFile, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestRelayArchivesToOSSAndSwitchesThroughSSH(t *testing.T) {
 	_ = tcp.SetDeadline(time.Now().Add(5 * time.Second))
 	go func() { result <- verifySSHDeployment(listener, server, digest) }()
 
-	cfg.archive.client = oss.NewClient(oss.LoadDefaultConfig().WithRegion("cn-hangzhou").
+	cfg.archive.uploadClient = oss.NewClient(oss.LoadDefaultConfig().WithRegion("cn-hangzhou").
 		WithUseAccelerateEndpoint(true).
 		WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test-key", "test-secret")).
 		WithHttpClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -171,7 +171,7 @@ func verifySSHDeployment(listener net.Listener, server *ssh.ServerConfig, digest
 		}
 		runID = match[1]
 		url, err := strconv.Unquote(strings.TrimSpace(strings.TrimPrefix(string(body), "url = ")))
-		if err != nil || !strings.HasPrefix(url, "https://photolib-test.oss-accelerate.aliyuncs.com/"+archivePrefix) ||
+		if err != nil || !strings.HasPrefix(url, "https://photolib-test.oss-cn-hangzhou-internal.aliyuncs.com/"+archivePrefix) ||
 			!strings.Contains(url, "x-oss-signature=") {
 			return fmt.Errorf("expected presigned OSS URL on SSH stdin")
 		}

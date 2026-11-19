@@ -65,6 +65,9 @@ func run(logger *slog.Logger) error {
 	console.HandleFunc("POST /api/deployments/{id}/rollback", auth.requireAdmin(relay.handleRollback))
 	console.HandleFunc("GET /api/github/{section}", auth.requireAdmin(github.list))
 	console.HandleFunc("GET /api/github/{section}/{id}", auth.requireAdmin(github.detail))
+	if err := registerUI(console); err != nil {
+		return err
+	}
 	mux.Handle("/", consoleHeaders(console))
 	server := &http.Server{
 		Addr:              cfg.listenAddr,

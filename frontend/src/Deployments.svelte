@@ -12,6 +12,7 @@
   let dialog
   let current = $derived(records.find(record => record.status === 'succeeded'))
   let latest = $derived(records[0])
+  let uncertain = $derived(latest && ['failed', 'interrupted'].includes(latest.status))
   const labels = { running: '进行中', succeeded: '成功', failed: '失败', interrupted: '中断' }
 
   async function reload() {
@@ -95,6 +96,7 @@
           <span class="muted">{date(record.started)}</span>
         </div>
         <p class="file-name">{record.originalName}</p>
+        {#if record.message}<p class="muted">{record.message}</p>{/if}
         <div class="links">
           {#if record.commit}<a href={repository + '/commit/' + record.commit} target="_blank" rel="noreferrer"><code>{record.commit.slice(0, 12)}</code> ↗</a>{/if}
           <a href={repository + '/actions/runs/' + record.run} target="_blank" rel="noreferrer">运行 #{record.run} ↗</a>
@@ -112,7 +114,7 @@
           </dl>
         </details>
       </div>
-      {#if record.archived && record.status === 'succeeded' && record.object !== current?.object}
+      {#if record.archived && record.status === 'succeeded' && (uncertain || record.object !== current?.object)}
         <button class="button" disabled={busy || latest?.status === 'running'} onclick={() => confirm(record)}>回滚到此版本</button>
       {:else if record.id === current?.id}
         <span class="status succeeded">最后确认</span>

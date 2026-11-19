@@ -16,6 +16,7 @@
   let loading = $state(true)
   let error = $state('')
   let details = $state({})
+  const dependabotCursors = new Map()
   const states = {
     open: '开放', closed: '已关闭', merged: '已合并', dismissed: '已忽略', fixed: '已修复',
     resolved: '已处理', success: '成功', failure: '失败', cancelled: '已取消', skipped: '已跳过',
@@ -32,7 +33,15 @@
     error = ''
     details = {}
     try {
-      const result = await api(`/api/github/${feed}?page=${to}`)
+      const query = new URLSearchParams({ page: to })
+      if (feed === 'dependabot' && dependabotCursors.has(to)) {
+        query.set('after', dependabotCursors.get(to))
+      }
+      const result = await api(`/api/github/${feed}?${query}`)
+      if (feed === 'dependabot') {
+        if (result.nextCursor) dependabotCursors.set(to + 1, result.nextCursor)
+        else dependabotCursors.delete(to + 1)
+      }
       items = result.items
       next = result.hasNext
       page = to
@@ -51,6 +60,7 @@
   function select(id) {
     if (source === id) return
     source = id
+    dependabotCursors.clear()
     items = []
     page = 1
     void load(1)

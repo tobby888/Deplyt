@@ -58,7 +58,14 @@ func (g githubRepository) list(w http.ResponseWriter, r *http.Request, _ adminis
 	}
 	query, _ := url.ParseQuery(feed.query)
 	query.Set("per_page", "20")
-	query.Set("page", page)
+	if name == "dependabot" {
+		// Dependabot paginates with the cursor in GitHub's Link header.
+		if after := r.URL.Query().Get("after"); after != "" {
+			query.Set("after", after)
+		}
+	} else {
+		query.Set("page", page)
+	}
 	response := g.fetch(w, r, feed.path+"?"+query.Encode())
 	if response == nil {
 		return
@@ -104,9 +111,35 @@ func (g githubRepository) list(w http.ResponseWriter, r *http.Request, _ adminis
 	if items == nil {
 		items = []json.RawMessage{}
 	}
-	writeJSON(w, map[string]any{
+	result := map[string]any{
 		"items": items, "hasNext": strings.Contains(response.Header.Get("Link"), `rel="next"`),
-	})
+	}
+	if name == "dependabot" {
+		cursor := dependabotNextCursor(response.Header.Values("Link"))
+		result["nextCursor"] = cursor
+		result["hasNext"] = cursor != ""
+	}
+	writeJSON(w, result)
+}
+
+func dependabotNextCursor(headers []string) string {
+	for _, header := range headers {
+		for entry := range strings.SplitSeq(header, ",") {
+			entry, ok := strings.CutPrefix(strings.TrimSpace(entry), "<")
+			if !ok {
+				continue
+			}
+			target, attributes, ok := strings.Cut(entry, ">")
+			if !ok || !strings.Contains(attributes, `rel="next"`) {
+				continue
+			}
+			link, err := url.Parse(target)
+			if err == nil {
+				return link.Query().Get("after")
+			}
+		}
+	}
+	return ""
 }
 
 func (g githubRepository) detail(w http.ResponseWriter, r *http.Request, _ administrator) {

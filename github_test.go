@@ -4,9 +4,56 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
+
+func TestDependabotAlertsUseCursorPagination(t *testing.T) {
+	const nextCursor = "opaque+cursor/="
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if r.URL.Path != photoLibRepository+"/dependabot/alerts" || query.Has("page") || query.Get("per_page") != "20" {
+			http.Error(w, "invalid Dependabot pagination", http.StatusBadRequest)
+			return
+		}
+		switch query.Get("after") {
+		case "":
+			w.Header().Set("Link", `<https://api.github.com/repositories/123/dependabot/alerts?per_page=20&after=`+
+				url.QueryEscape(nextCursor)+`>; rel="next"`)
+			_, _ = io.WriteString(w, `[{"number":21}]`)
+		case nextCursor:
+			w.Header().Set("Link", `<https://api.github.com/repositories/123/dependabot/alerts?before=other>; rel="prev"`)
+			_, _ = io.WriteString(w, `[{"number":1}]`)
+		default:
+			http.Error(w, "invalid cursor", http.StatusBadRequest)
+		}
+	}))
+	defer api.Close()
+	repo := newGitHub(testToken)
+	repo.base = api.URL
+
+	for _, tc := range []struct {
+		query    string
+		expected []string
+	}{
+		{"page=1", []string{`"number":21`, `"hasNext":true`, `"nextCursor":"` + nextCursor + `"`}},
+		{"page=2&after=" + url.QueryEscape(nextCursor), []string{`"number":1`, `"hasNext":false`}},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/api/github/dependabot?"+tc.query, nil)
+		r.SetPathValue("section", "dependabot")
+		w := httptest.NewRecorder()
+		repo.list(w, r, administrator{})
+		if w.Code != http.StatusOK {
+			t.Fatalf("query %q returned %d: %s", tc.query, w.Code, w.Body)
+		}
+		for _, expected := range tc.expected {
+			if !strings.Contains(w.Body.String(), expected) {
+				t.Fatalf("query %q missing %q: %s", tc.query, expected, w.Body)
+			}
+		}
+	}
+}
 
 func TestGitHubFeedsKeepTokenServerSideAndRedactSecrets(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

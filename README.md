@@ -1,6 +1,6 @@
 # Deplyt
 
-Deplyt 接收 PhotoLib GitHub Actions 打包后的 JAR，将校验通过的文件上传到阿里云 OSS，再通过 SSH 让生产机从加速域名下载。生产机重新校验 SHA-256，切换 JAR，启动服务并检查 systemd 状态。控制台通过 PhotoLib 管理员单点登录，提供部署及回滚记录、提交、PR、Actions 和安全告警。
+Deplyt 是 PhotoLib 的自动化部署平台。控制台跟随 PhotoLib 当前生效的自定义或定时图标，使用 PhotoLib 账号登录。获得授权的成员可以触发 GitHub Actions、部署指定 OSS 制品和查看发布记录。管理员可以管理访问权限、回滚 OSS 归档并查看仓库活动和安全告警。
 
 ## 安装到 Linux 中转机
 
@@ -40,12 +40,17 @@ curl -fsS http://127.0.0.1:8080/healthz
 | `OSS_BUCKET` | PhotoLib 当前使用的私有 Bucket。 |
 | `OSS_REGION` | Bucket 所在地域，例如 `cn-hangzhou`。 |
 | `OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` | Deplyt 专用 RAM 凭据，仅需访问下述 JAR 前缀。 |
+| `OSS_ECS_RAM_ROLE` | 在阿里云 ECS 上部署时，可填实例绑定的 RAM 角色名。SDK 自动取得并更新临时凭据。此模式无需填写 AccessKey。 |
 | `DEPLYT_PUBLIC_URL`、`PHOTOLIB_PUBLIC_URL` | Deplyt 和 PhotoLib 的 HTTPS 源地址，例如 `https://deploy.example.com`，带非默认端口时需填写端口。 |
-| `DEPLYT_SSO_SECRET` | SSO 客户端密钥。通过 `openssl rand -hex 32` 生成独立于上传令牌的密钥，并在 PhotoLib 和 Deplyt 填入相同值。 |
+| `DEPLOY_ADMIN_PHOTOLIB_ID` | Deplyt 管理员的 PhotoLib 用户数字 ID。配置后仅该账号管理 Deplyt。 |
+| `DEPLYT_SSO_SECRET` | 可选的 PhotoLib 管理员单点登录密钥。通过 `openssl rand -hex 32` 生成，并在 PhotoLib 和 Deplyt 填入相同值。 |
 | `GITHUB_TOKEN` | 仅在 Deplyt 后端使用，限定到 `tobby888/Photolib` 的细粒度 PAT。 |
-| `DEPLOY_STATE_DIR` | 部署记录目录。systemd 默认使用 `/var/lib/deplyt`，手动运行默认使用当前目录的 `data/`。升级时保留该目录。 |
+| `GITHUB_ACTIONS_TOKEN` | 限定到 PhotoLib 仓库、具有 `Actions: write` 权限的细粒度 PAT。启用控制台的手动工作流。 |
+| `DEPLOY_STATE_DIR` | 部署记录与访问权限目录。systemd 默认使用 `/var/lib/deplyt`，手动运行默认使用当前目录的 `data/`。升级时保留该目录。 |
 
 ## OSS 归档与回滚
+
+配置归档凭据后，CI 和手动 OSS 部署都会将校验通过的 JAR 归档到私有 OSS，随后通过 SSH 让生产机使用签名 URL 下载。生产机会重新校验 SHA-256，再切换 JAR、重启服务并检查 systemd 状态。
 
 1. 为共享 Bucket 开启[传输加速](https://www.alibabacloud.com/help/en/oss/user-guide/transfer-acceleration)。Deplyt 使用 `<bucket>.oss-accelerate.aliyuncs.com` 上传与签名，两个服务器均需能访问该地址。PhotoLib 继续使用原有 OSS 配置。
 2. 仅授予 Deplyt 凭据对 `deplyt/photolib/*` 的 `oss:PutObject` 和 `oss:GetObject`。确保 Bucket 生命周期规则对该前缀永久保留，且不会转到需要解冻的存储类型。
@@ -53,15 +58,30 @@ curl -fsS http://127.0.0.1:8080/healthz
 4. 生产机需提供 `curl`、`bash`、`sha256sum`、`flock`、现有的 `maint-on`、`maint-off` 和 `photolib.service`。目录 `/opt/Photolib` 应仅有一个匹配 `photolib-backend-*.jar` 的运行包。切换过程中临时把旧包移出匹配范围，新服务启动失败时尝试恢复旧包。
 5. 控制台可选择曾部署成功的归档，确认后从原对象下载并校验，再执行同一套切换流程。回滚记录保留原 SHA-256、来源提交、运行编号和操作管理员。控制台显示最后确认版本，超时或进程中断后可通过日志核实生产状态。首次上线前的部署没有 Deplyt 记录。
 
-## PhotoLib 单点登录与 GitHub
+## 使用令牌部署 OSS 制品
 
-将配套变更部署到 PhotoLib，并在 PhotoLib 后端 `.env` 加入相同的 `DEPLYT_PUBLIC_URL` 与 `DEPLYT_SSO_SECRET`。Deplyt 回调为 `/auth/callback`。浏览器会先进入 PhotoLib 的授权页面，未登录时在 PhotoLib 完成现有登录流程。仅 PhotoLib 的 `ADMIN` 权限组可以授权。授权码有效期为 60 秒且只能使用一次，Deplyt 会话有效期为 30 分钟。用户可从控制台退出。
+| 配置 | 用途 |
+| --- | --- |
+| `OSS_ARTIFACT_URL` | HTTPS 对象下载 URL。私有 OSS 使用完整的 GetObject 预签名 URL，并保留签名参数。 |
+| `OSS_ARTIFACT_NAME` | 可选，默认为 URL 中的文件名。下载端点的路径缺少文件名时，填实际的 `photolib-backend-*.jar` 文件名。 |
+| `OSS_ARTIFACT_SHA256` | 可信构建产物的 SHA-256。更新对象时一并更新。 |
+| `OSS_ACCESS_TOKEN` | 下载端点支持 Bearer 认证时填写。Deplyt 会发送 `Authorization: Bearer`。使用预签名 URL 时留空。 |
+
+配置后，已授权成员可点「部署 OSS 制品」。Deplyt 会校验文件大小、SHA-256 和 JAR 必需条目。仅配置制品下载时，手动 OSS 部署和 CI 上传都通过 SSH 直接中转校验后的 JAR。配置归档凭据后可回滚到已成功部署并归档的版本。标准 OSS 的 STS SecurityToken 需与临时 AccessKey 配合签名，可以由凭证持有方提供预签名 URL。
+
+## PhotoLib 账号授权与 GitHub
+
+成员在 Deplyt 点「使用 PhotoLib 登录」，到 PhotoLib 批准配对，再回到 Deplyt 检查结果。首次验证后，账号会显示在管理员的「访问权限」页。管理员可在该页授予或撤销权限，成员刷新即可看到结果。回滚和仓库活动仍由 Deplyt 管理员操作。
+
+如果使用原有的 PhotoLib 管理员单点登录，请在 PhotoLib 部署配套变更并配置相同的 `DEPLYT_PUBLIC_URL` 与 `DEPLYT_SSO_SECRET`。回调路径为 `/auth/callback`。未指定 `DEPLOY_ADMIN_PHOTOLIB_ID` 时，通过该单点登录验证的 PhotoLib 管理员可以管理 Deplyt。
 
 为 `GITHUB_TOKEN` 授予 Contents、Pull requests、Actions、Dependabot alerts、Code scanning alerts、Secret scanning alerts 的 Read 权限。GitHub 仓库需启用对应扫描功能，控制台会在相应板块显示权限或功能错误。凭据扫描页只展示告警元数据。[GitHub PAT 权限文档](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
 
+配置 `GITHUB_ACTIONS_TOKEN` 后，已授权成员可手动触发 PhotoLib `master` 上的 `build.yml`，并在 GitHub 查看运行进度。
+
 ## 连接 PhotoLib 的 GitHub Actions
 
-在 PhotoLib 仓库配置以下 Actions 变量和 Secret，再将更新的工作流合并到 `master`。
+在 PhotoLib 仓库配置以下 Actions 变量和 Secret，确保 `master` 上的 `build.yml` 包含中转部署任务。
 
 | 类型 | 名称 | 值 |
 | --- | --- | --- |

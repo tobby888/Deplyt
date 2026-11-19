@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,9 @@ type administrator struct {
 
 type adminSession struct {
 	administrator
-	expires time.Time
+	expires    time.Time
+	privileged bool
+	photo      *consoleSession
 }
 
 type consoleAuth struct {
@@ -40,6 +43,9 @@ type consoleAuth struct {
 	client   *http.Client
 	mu       sync.Mutex
 	sessions map[string]adminSession
+	pairings map[string]*pairing
+	access   *accessRegistry
+	photo    photoLibClient
 }
 
 func newConsoleAuth(values map[string]string) (*consoleAuth, error) {
@@ -52,12 +58,14 @@ func newConsoleAuth(values map[string]string) (*consoleAuth, error) {
 		return nil, errors.New("PHOTOLIB_PUBLIC_URL must be an HTTPS origin")
 	}
 	secret := values["DEPLYT_SSO_SECRET"]
-	if len(secret) < 32 || strings.ContainsAny(secret, " \t\r\n") {
+	if secret != "" && (len(secret) < 32 || strings.ContainsAny(secret, " \t\r\n")) {
 		return nil, errors.New("DEPLYT_SSO_SECRET must have at least 32 characters and no whitespace")
 	}
 	return &consoleAuth{
 		origin: origin, photoLib: photoLib, secret: secret, sessions: make(map[string]adminSession),
-		client: &http.Client{Timeout: 10 * time.Second, CheckRedirect: rejectRedirect},
+		client:   &http.Client{Timeout: 10 * time.Second, CheckRedirect: rejectRedirect},
+		pairings: make(map[string]*pairing),
+		photo:    photoLibClient{origin: photoLib, http: outboundClient(8 * time.Second)},
 	}, nil
 }
 
@@ -95,6 +103,10 @@ func authCookie(w http.ResponseWriter, name, value string, seconds int) {
 }
 
 func (a *consoleAuth) start(w http.ResponseWriter, r *http.Request) {
+	if a.secret == "" {
+		http.NotFound(w, r)
+		return
+	}
 	state, verifier := randomToken(), randomToken()
 	hash := sha256.Sum256([]byte(verifier))
 	query := url.Values{"state": {state}, "challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}}
@@ -103,6 +115,10 @@ func (a *consoleAuth) start(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *consoleAuth) callback(w http.ResponseWriter, r *http.Request) {
+	if a.secret == "" {
+		http.NotFound(w, r)
+		return
+	}
 	cookie, err := r.Cookie(loginCookie)
 	code, state := r.URL.Query().Get("code"), r.URL.Query().Get("state")
 	if err != nil || !validToken(code) || !validToken(state) {
@@ -121,20 +137,18 @@ func (a *consoleAuth) callback(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?login=failed", http.StatusSeeOther)
 		return
 	}
-	now := time.Now()
-	token := randomToken()
-	a.mu.Lock()
-	for key, session := range a.sessions {
-		if !now.Before(session.expires) {
-			delete(a.sessions, key)
+	privileged := a.access == nil || a.access.admin == 0 || admin.ID == strconv.FormatInt(a.access.admin, 10)
+	if !privileged && a.access != nil {
+		id, err := strconv.ParseInt(admin.ID, 10, 64)
+		if err != nil || id <= 0 || a.access.register(photoLibUser{ID: id, Username: admin.Username}) != nil {
+			http.Redirect(w, r, "/?login=failed", http.StatusSeeOther)
+			return
 		}
 	}
-	if old, err := r.Cookie(sessionCookie); err == nil {
-		delete(a.sessions, old.Value)
+	if !a.setSession(w, r, adminSession{administrator: admin, privileged: privileged}, sessionLife) {
+		http.Redirect(w, r, "/?login=failed", http.StatusSeeOther)
+		return
 	}
-	a.sessions[token] = adminSession{administrator: admin, expires: now.Add(sessionLife)}
-	a.mu.Unlock()
-	authCookie(w, sessionCookie, token, int(sessionLife.Seconds()))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -166,41 +180,37 @@ func (a *consoleAuth) exchange(ctx context.Context, code, verifier string) (admi
 	return result.Data, nil
 }
 
-func (a *consoleAuth) admin(r *http.Request) (administrator, bool) {
-	cookie, err := r.Cookie(sessionCookie)
-	if err != nil {
-		return administrator{}, false
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	session, ok := a.sessions[cookie.Value]
-	if !ok || !time.Now().Before(session.expires) {
-		delete(a.sessions, cookie.Value)
-		return administrator{}, false
-	}
-	return session.administrator, true
-}
-
-func (a *consoleAuth) requireAdmin(next func(http.ResponseWriter, *http.Request, administrator)) http.HandlerFunc {
+func (a *consoleAuth) protect(level accessLevel, next func(http.ResponseWriter, *http.Request, consoleIdentity)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		admin, ok := a.admin(r)
-		if !ok {
-			http.Error(w, "请使用 PhotoLib 管理员账号登录", http.StatusUnauthorized)
-			return
-		}
 		if r.Method != http.MethodGet && r.Header.Get("Origin") != a.origin {
 			http.Error(w, "请求来源无效", http.StatusForbidden)
 			return
 		}
-		next(w, r, admin)
+		user, err := a.identity(r)
+		if errors.Is(err, errPhotoLibSession) {
+			http.Error(w, "请使用 PhotoLib 账号登录", http.StatusUnauthorized)
+			return
+		}
+		if err != nil {
+			http.Error(w, "暂时无法验证 PhotoLib 账号", http.StatusBadGateway)
+			return
+		}
+		if level == adminAccess && !user.Admin || level == grantedAccess && !user.Allowed {
+			http.Error(w, "此操作需要 Deplyt 授权", http.StatusForbidden)
+			return
+		}
+		next(w, r, user)
 	}
 }
 
+func (a *consoleAuth) requireAdmin(next func(http.ResponseWriter, *http.Request, administrator)) http.HandlerFunc {
+	return a.protect(adminAccess, func(w http.ResponseWriter, r *http.Request, user consoleIdentity) {
+		next(w, r, user.administrator)
+	})
+}
+
 func (a *consoleAuth) logout(w http.ResponseWriter, r *http.Request, _ administrator) {
-	cookie, _ := r.Cookie(sessionCookie)
-	a.mu.Lock()
-	delete(a.sessions, cookie.Value)
-	a.mu.Unlock()
+	a.dropSession(r)
 	authCookie(w, sessionCookie, "", -1)
 	w.WriteHeader(http.StatusNoContent)
 }

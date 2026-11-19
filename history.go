@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -87,6 +89,10 @@ func (h history) save(record deployment) error {
 	if err := os.Rename(f.Name(), filepath.Join(string(h), record.ID+".json")); err != nil {
 		return err
 	}
+	// Windows does not support fsync on a directory opened by os.Open.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	dir, err := os.Open(string(h))
 	if err != nil {
 		return err
@@ -107,8 +113,9 @@ func (h history) load(id string) (deployment, error) {
 	if err := json.Unmarshal(data, &record); err != nil {
 		return deployment{}, err
 	}
+	directTransfer := (record.Kind == "oss" || record.Kind == "deploy") && !record.Archived && record.Object == ""
 	if record.ID != id || !jarNamePattern.MatchString(record.Name) ||
-		!sha256Pattern.MatchString(record.SHA256) || record.Object != archivePrefix+record.Name {
+		!sha256Pattern.MatchString(record.SHA256) || (!directTransfer && record.Object != archivePrefix+record.Name) {
 		return deployment{}, fmt.Errorf("invalid deployment record %s", id)
 	}
 	return record, nil
@@ -168,6 +175,10 @@ func (s *relay) handleRollback(w http.ResponseWriter, r *http.Request, admin adm
 		http.Error(w, "无法读取回滚版本", http.StatusInternalServerError)
 		return
 	}
+	if s.downloadURL == nil {
+		http.Error(w, "回滚需要配置 OSS 归档凭证", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Context().Err() != nil {
 		return
 	}
@@ -192,6 +203,10 @@ func (s *relay) handleRollback(w http.ResponseWriter, r *http.Request, admin adm
 func (s *relay) apply(w http.ResponseWriter, ctx context.Context, record deployment) bool {
 	logger := s.logger.With("deployment_id", record.ID, "run_id", record.Run, "object", record.Object)
 	err := s.activate(ctx, artifact{name: record.Name, key: record.Object, sha256: record.SHA256}, record.ID, logger)
+	return s.finishDeployment(w, record, err, logger)
+}
+
+func (s *relay) finishDeployment(w http.ResponseWriter, record deployment, err error, logger *slog.Logger) bool {
 	status, message := "succeeded", ""
 	if err != nil {
 		logger.Error("production deployment failed", "error", err)

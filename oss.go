@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -17,16 +18,28 @@ type jarArchive struct {
 }
 
 func newArchive(values map[string]string) (jarArchive, error) {
-	for _, key := range []string{"OSS_BUCKET", "OSS_REGION", "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET"} {
+	for _, key := range []string{"OSS_BUCKET", "OSS_REGION"} {
 		if values[key] == "" {
 			return jarArchive{}, fmt.Errorf("%s is required", key)
 		}
 	}
+	id, secret, role := values["OSS_ACCESS_KEY_ID"], values["OSS_ACCESS_KEY_SECRET"], values["OSS_ECS_RAM_ROLE"]
+	var provider credentials.CredentialsProvider
+	if role != "" {
+		if id != "" || secret != "" {
+			return jarArchive{}, errors.New("configure either OSS_ECS_RAM_ROLE or OSS AccessKey credentials")
+		}
+		provider = credentials.NewEcsRoleCredentialsProvider(credentials.EcsRamRole(role))
+	} else {
+		if id == "" || secret == "" {
+			return jarArchive{}, errors.New("OSS archiving requires OSS_ECS_RAM_ROLE or both OSS AccessKey settings")
+		}
+		provider = credentials.NewStaticCredentialsProvider(id, secret)
+	}
 	cfg := oss.LoadDefaultConfig().
 		WithRegion(values["OSS_REGION"]).
 		WithUseAccelerateEndpoint(true).
-		WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			values["OSS_ACCESS_KEY_ID"], values["OSS_ACCESS_KEY_SECRET"]))
+		WithCredentialsProvider(provider)
 	return jarArchive{client: oss.NewClient(cfg), bucket: values["OSS_BUCKET"]}, nil
 }
 

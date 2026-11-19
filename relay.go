@@ -28,6 +28,8 @@ type artifact struct {
 	name   string
 	sha256 string
 	key    string
+	file   *os.File
+	size   int64
 }
 
 type relay struct {
@@ -72,94 +74,130 @@ func (s *relay) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	logger := s.logger.With("run_id", runID, "artifact", name)
 
+	staged, stageErr := stageArtifact(http.MaxBytesReader(w, r.Body, s.maxSize), name, expectedSum, s.maxSize, logger)
+	if stageErr != nil {
+		http.Error(w, stageErr.Error(), stageErr.status)
+		return
+	}
+	defer staged.remove(logger)
+	if r.Context().Err() != nil {
+		return
+	}
+	if s.publish(w, r.Context(), staged, runID, commit, administrator{}) {
+		_, _ = io.WriteString(w, "PhotoLib deployed\n")
+	}
+}
+
+type stagingError struct {
+	message string
+	status  int
+}
+
+func (e *stagingError) Error() string { return e.message }
+
+func stageArtifact(source io.Reader, name string, expectedSum []byte, maxSize int64, logger *slog.Logger) (artifact, *stagingError) {
 	file, err := os.CreateTemp("", "deplyt-*.jar")
 	if err != nil {
 		logger.Error("create temporary file", "error", err)
-		http.Error(w, "cannot stage JAR on relay", http.StatusInternalServerError)
-		return
+		return artifact{}, &stagingError{"cannot stage JAR on relay", http.StatusInternalServerError}
 	}
+	jar := artifact{name: name, file: file}
+	accepted := false
 	defer func() {
-		_ = file.Close()
-		if err := os.Remove(file.Name()); err != nil {
-			logger.Warn("remove temporary JAR", "error", err)
+		if !accepted {
+			jar.remove(logger)
 		}
 	}()
 
 	hash := sha256.New()
-	// Hash the JAR as it streams to disk.
-	size, err := io.Copy(io.MultiWriter(file, hash), http.MaxBytesReader(w, r.Body, s.maxSize))
+	size, err := io.Copy(io.MultiWriter(file, hash), io.LimitReader(source, maxSize+1))
+	var tooLarge *http.MaxBytesError
+	if size > maxSize || errors.As(err, &tooLarge) {
+		return artifact{}, &stagingError{"JAR exceeds upload limit", http.StatusRequestEntityTooLarge}
+	}
 	if err != nil {
-		var tooLarge *http.MaxBytesError
 		var fileError *os.PathError
-		switch {
-		case errors.As(err, &tooLarge):
-			http.Error(w, "JAR exceeds upload limit", http.StatusRequestEntityTooLarge)
-		case errors.As(err, &fileError):
+		if errors.As(err, &fileError) {
 			logger.Error("write temporary JAR", "error", err)
-			http.Error(w, "cannot stage JAR on relay", http.StatusInternalServerError)
-		default:
-			logger.Warn("read JAR upload", "error", err)
-			http.Error(w, "incomplete JAR upload", http.StatusBadRequest)
+			return artifact{}, &stagingError{"cannot stage JAR on relay", http.StatusInternalServerError}
 		}
-		return
+		return artifact{}, &stagingError{"incomplete JAR transfer", http.StatusBadRequest}
 	}
 	actualSum := hash.Sum(nil)
 	if subtle.ConstantTimeCompare(actualSum, expectedSum) != 1 {
-		http.Error(w, "JAR SHA-256 mismatch", http.StatusUnprocessableEntity)
-		return
+		return artifact{}, &stagingError{"JAR SHA-256 mismatch", http.StatusUnprocessableEntity}
 	}
 	if err := validateJAR(file, size); err != nil {
 		logger.Warn("invalid PhotoLib JAR", "error", err)
-		http.Error(w, "invalid PhotoLib JAR", http.StatusUnprocessableEntity)
-		return
+		return artifact{}, &stagingError{"invalid PhotoLib JAR", http.StatusUnprocessableEntity}
 	}
-	if r.Context().Err() != nil {
-		return
-	}
+	jar.sha256 = hex.EncodeToString(actualSum)
+	jar.size = size
+	accepted = true
+	return jar, nil
+}
 
-	// Once accepted, deployment must finish even if the runner disconnects.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), deployTimeout)
+func (a artifact) remove(logger *slog.Logger) {
+	_ = a.file.Close()
+	if err := os.Remove(a.file.Name()); err != nil {
+		logger.Warn("remove temporary JAR", "error", err)
+	}
+}
+
+func (s *relay) publish(w http.ResponseWriter, ctx context.Context, staged artifact, runID, commit string, operator administrator) bool {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deployTimeout)
 	defer cancel()
 	id := strings.ToLower(rand.Text())
-	sum := hex.EncodeToString(actualSum)
-	archiveName := fmt.Sprintf("photolib-backend-%s-%s-%s.jar", runID, id, sum)
-	record := deployment{
-		ID: id, Kind: "deploy", Status: "running", Run: runID, Commit: strings.ToLower(commit),
-		Name: archiveName, OriginalName: name, Object: archivePrefix + archiveName,
-		SHA256: sum, Size: size, Started: time.Now().UTC(),
+	kind, source := "deploy", runID
+	if runID == "" {
+		kind, source = "oss", "oss"
 	}
-	logger = logger.With("deployment_id", id, "object", record.Object)
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
+	name := fmt.Sprintf("photolib-backend-%s-%s-%s.jar", source, id, staged.sha256)
+	record := deployment{
+		ID: id, Kind: kind, Status: "running", Run: runID, Commit: strings.ToLower(commit),
+		Name: name, OriginalName: staged.name, Operator: operator,
+		SHA256: staged.sha256, Size: staged.size, Started: time.Now().UTC(),
+	}
+	if s.archive != nil {
+		record.Object = archivePrefix + name
+	}
+	logger := s.logger.With("deployment_id", id, "run_id", runID, "user_id", operator.ID)
+	if _, err := staged.file.Seek(0, io.SeekStart); err != nil {
 		logger.Error("rewind staged JAR", "error", err)
 		http.Error(w, "cannot stage JAR on relay", http.StatusInternalServerError)
-		return
+		return false
 	}
 	if err := s.history.save(record); err != nil {
 		logger.Error("create deployment record", "error", err)
 		http.Error(w, "cannot save deployment record", http.StatusInternalServerError)
-		return
+		return false
 	}
-	if err := s.archive(ctx, record.Object, sum, file); err != nil {
+	if s.archive == nil {
+		staged.name = name
+		err := s.deploy(ctx, staged, record.ID, "", logger)
+		return s.finishDeployment(w, record, err, logger)
+	}
+	if err := s.archive(ctx, record.Object, staged.sha256, staged.file); err != nil {
 		logger.Error("archive JAR in OSS", "error", err)
 		if err := s.history.finish(record, "failed", "OSS 归档未获确认"); err != nil {
 			logger.Error("save archive failure", "error", err)
 		}
 		http.Error(w, "cannot archive JAR in OSS", http.StatusBadGateway)
-		return
+		return false
 	}
 	record.Archived = true
 	if err := s.history.save(record); err != nil {
 		logger.Error("record OSS archive", "error", err)
 		http.Error(w, "cannot save archive status", http.StatusInternalServerError)
-		return
+		return false
 	}
-	if !s.apply(w, ctx, record) {
-		return
-	}
-	_, _ = io.WriteString(w, "PhotoLib deployed\n")
+	return s.apply(w, ctx, record)
 }
 
 func (s *relay) activate(ctx context.Context, jar artifact, stageID string, logger *slog.Logger) error {
+	if s.downloadURL == nil {
+		return errors.New("OSS archive credentials are not configured")
+	}
 	downloadURL, err := s.downloadURL(ctx, jar.key)
 	if err != nil {
 		return errors.New("cannot sign OSS download")

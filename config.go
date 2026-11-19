@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,8 @@ type config struct {
 	token      string
 	production productionServer
 	archive    jarArchive
+	manualOSS  *ossArtifact
+	adminID    int64
 	values     map[string]string
 }
 
@@ -54,12 +57,31 @@ func loadConfig(path string) (config, error) {
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
-	archive, err := newArchive(values)
+	manual, err := loadOSSArtifact(values)
 	if err != nil {
 		return config{}, err
 	}
+	var archive jarArchive
+	if manual == nil || values["OSS_ACCESS_KEY_ID"] != "" || values["OSS_ACCESS_KEY_SECRET"] != "" || values["OSS_ECS_RAM_ROLE"] != "" {
+		archive, err = newArchive(values)
+		if err != nil {
+			return config{}, err
+		}
+	}
+	var adminID int64
+	if value := values["DEPLOY_ADMIN_PHOTOLIB_ID"]; value != "" {
+		adminID, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || adminID <= 0 {
+			return config{}, errors.New("DEPLOY_ADMIN_PHOTOLIB_ID must be a positive PhotoLib user ID")
+		}
+	}
+	if strings.ContainsAny(values["GITHUB_ACTIONS_TOKEN"], " \t\r\n") {
+		return config{}, errors.New("GITHUB_ACTIONS_TOKEN must not contain whitespace")
+	}
 	return config{
 		archive:    archive,
+		manualOSS:  manual,
+		adminID:    adminID,
 		values:     values,
 		listenAddr: addr,
 		token:      token,
@@ -70,4 +92,13 @@ func loadConfig(path string) (config, error) {
 			hostKey:  hostKey,
 		},
 	}, nil
+}
+
+func parseHTTPSEndpoint(value string) (*url.URL, error) {
+	endpoint, err := url.Parse(value)
+	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" ||
+		endpoint.User != nil || endpoint.Fragment != "" {
+		return nil, errors.New("expected an HTTPS URL")
+	}
+	return endpoint, nil
 }

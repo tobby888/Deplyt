@@ -1,19 +1,21 @@
 <script>
   import { onMount } from 'svelte'
-  import { api, date, repository } from './api.js'
+  import { api, date, githubLink, repository } from './api.js'
 
-  let { onExpired } = $props()
+  let { user, onExpired } = $props()
   let records = $state([])
   let loading = $state(true)
   let error = $state('')
   let feedback = $state('')
   let busy = $state(false)
+  let workflowURL = $state('')
   let target = $state(null)
   let dialog
   let current = $derived(records.find(record => record.status === 'succeeded'))
   let latest = $derived(records[0])
   let uncertain = $derived(latest && ['failed', 'interrupted'].includes(latest.status))
   const labels = { running: '进行中', succeeded: '成功', failed: '失败', interrupted: '中断' }
+  const kinds = { deploy: 'CI 发布', oss: 'OSS 手动部署', rollback: '管理员回滚' }
 
   async function reload() {
     loading = true
@@ -29,6 +31,28 @@
   }
 
   onMount(() => { void reload() })
+
+  async function deploy(source) {
+    if (busy) return
+    busy = true
+    workflowURL = ''
+    feedback = source === 'oss' ? '正在下载并校验 OSS 制品，等待生产服务完成状态检查…' : '正在触发 PhotoLib 工作流…'
+    try {
+      const result = await api('/api/deployments/' + source, { method: 'POST' })
+      if (source === 'workflow') {
+        workflowURL = githubLink(result.url)
+        feedback = '已触发 PhotoLib 工作流。'
+      } else {
+        feedback = '部署完成，生产服务已通过状态检查。'
+      }
+    } catch (err) {
+      if (err.status === 401) onExpired()
+      feedback = err.message
+    } finally {
+      busy = false
+      if (source === 'oss') await reload()
+    }
+  }
 
   function confirm(record) {
     target = record
@@ -74,7 +98,24 @@
 {#if latest && latest.status !== 'succeeded'}
   <p class="notice" role="status">最近一次操作{labels[latest.status]}。{latest.message ?? ''}</p>
 {/if}
-{#if feedback}<p class="notice" role="status">{feedback}</p>{/if}
+{#if user.workflow || user.artifact}
+  <section class="panel" aria-label="手动部署">
+    <div class="panel-heading">
+      <div>
+        <h2>手动部署</h2>
+        {#if user.workflow}<p class="muted">PhotoLib 的 master 工作流通过构建和测试后发布到生产环境。</p>{/if}
+        {#if user.artifact}<p class="muted">OSS 制品 <code>{user.artifact}</code></p>{/if}
+      </div>
+      <div class="login-actions">
+        {#if user.workflow}<button class="button primary" disabled={busy} onclick={() => deploy('workflow')}>触发部署工作流</button>{/if}
+        {#if user.artifact}<button class="button" disabled={busy || latest?.status === 'running'} onclick={() => deploy('oss')}>部署 OSS 制品</button>{/if}
+      </div>
+    </div>
+  </section>
+{/if}
+{#if feedback}
+  <p class="notice" role="status">{feedback} {#if workflowURL}<a href={workflowURL} target="_blank" rel="noreferrer">查看 GitHub Actions ↗</a>{/if}</p>
+{/if}
 {#if error}<p class="notice danger" role="alert">{error}</p>{/if}
 
 <section class="panel">
@@ -92,29 +133,29 @@
       <div class="release-info">
         <div class="row-title">
           <span class={'status ' + record.status}>{labels[record.status] ?? record.status}</span>
-          <strong>{record.kind === 'rollback' ? '管理员回滚' : 'CI 发布'}</strong>
+          <strong>{kinds[record.kind] ?? record.kind}</strong>
           <span class="muted">{date(record.started)}</span>
         </div>
         <p class="file-name">{record.originalName}</p>
         {#if record.message}<p class="muted">{record.message}</p>{/if}
         <div class="links">
           {#if record.commit}<a href={repository + '/commit/' + record.commit} target="_blank" rel="noreferrer"><code>{record.commit.slice(0, 12)}</code> ↗</a>{/if}
-          <a href={repository + '/actions/runs/' + record.run} target="_blank" rel="noreferrer">运行 #{record.run} ↗</a>
+          {#if record.run}<a href={repository + '/actions/runs/' + record.run} target="_blank" rel="noreferrer">运行 #{record.run} ↗</a>{/if}
           <span>{record.operator.username || 'GitHub Actions'}</span>
         </div>
         <details>
           <summary>归档与校验详情</summary>
           <dl class="facts">
             <div><dt>SHA-256</dt><dd><code>{record.sha256}</code></dd></div>
-            <div><dt>OSS 对象</dt><dd><code>{record.object}</code></dd></div>
-            <div><dt>归档状态</dt><dd>{record.archived ? '已归档' : '归档未获确认'}</dd></div>
+            {#if record.object}<div><dt>OSS 对象</dt><dd><code>{record.object}</code></dd></div>{/if}
+            <div><dt>归档状态</dt><dd>{record.archived ? '已归档' : record.object ? '归档未获确认' : '直接中转'}</dd></div>
             <div><dt>文件大小</dt><dd>{(record.size / 1048576).toFixed(1)} MiB</dd></div>
             <div><dt>完成时间</dt><dd>{date(record.finished)}</dd></div>
             {#if record.target}<div><dt>目标记录</dt><dd><code>{record.target}</code></dd></div>{/if}
           </dl>
         </details>
       </div>
-      {#if record.archived && record.status === 'succeeded' && (uncertain || record.object !== current?.object)}
+      {#if user.admin && user.archive && record.archived && record.status === 'succeeded' && (uncertain || record.object !== current?.object)}
         <button class="button" disabled={busy || latest?.status === 'running'} onclick={() => confirm(record)}>回滚到此版本</button>
       {:else if record.id === current?.id}
         <span class="status succeeded">最后确认</span>

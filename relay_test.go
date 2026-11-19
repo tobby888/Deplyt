@@ -67,7 +67,8 @@ func TestRelayRejectsInvalidUploads(t *testing.T) {
 	}
 }
 
-func TestRelayArchivesToOSSAndSwitchesThroughSSH(t *testing.T) {
+func makeTestJAR(t *testing.T) []byte {
+	t.Helper()
 	var data bytes.Buffer
 	archive := zip.NewWriter(&data)
 	for _, name := range []string{
@@ -87,7 +88,11 @@ func TestRelayArchivesToOSSAndSwitchesThroughSSH(t *testing.T) {
 	if err := archive.Close(); err != nil {
 		t.Fatal(err)
 	}
+	return data.Bytes()
+}
 
+func TestRelayArchivesToOSSAndSwitchesThroughSSH(t *testing.T) {
+	data := makeTestJAR(t)
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +126,7 @@ func TestRelayArchivesToOSSAndSwitchesThroughSSH(t *testing.T) {
 	}}
 	server.AddHostKey(key)
 	result := make(chan error, 1)
-	digest := fmt.Sprintf("%x", sha256.Sum256(data.Bytes()))
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
 	tcp := listener.(*net.TCPListener)
 	_ = tcp.SetDeadline(time.Now().Add(5 * time.Second))
 	go func() { result <- verifySSHDeployment(listener, server, digest) }()
@@ -135,7 +140,7 @@ func TestRelayArchivesToOSSAndSwitchesThroughSSH(t *testing.T) {
 				!strings.HasPrefix(r.URL.Path, "/"+archivePrefix+"photolib-backend-12345-") ||
 				!strings.HasSuffix(r.URL.Path, "-"+digest+".jar") ||
 				r.Header.Get("x-oss-meta-sha256") != digest || r.Header.Get("x-oss-forbid-overwrite") != "true" ||
-				r.Header.Get("x-oss-object-acl") != "private" || !bytes.Equal(body, data.Bytes()) || err != nil {
+				r.Header.Get("x-oss-object-acl") != "private" || !bytes.Equal(body, data) || err != nil {
 				t.Errorf("unexpected OSS upload: %s %s", r.Method, r.URL)
 			}
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
@@ -143,7 +148,7 @@ func TestRelayArchivesToOSSAndSwitchesThroughSSH(t *testing.T) {
 	handler := &relay{token: cfg.token, maxSize: maxJARSize, logger: slog.New(slog.DiscardHandler), history: history(t.TempDir()),
 		archive: cfg.archive.upload, downloadURL: cfg.archive.downloadURL, deploy: cfg.production.deploy}
 	response := httptest.NewRecorder()
-	handler.handleDeploy(response, deploymentRequest(data.Bytes()))
+	handler.handleDeploy(response, deploymentRequest(data))
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}

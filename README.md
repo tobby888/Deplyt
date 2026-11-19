@@ -1,13 +1,20 @@
 # Deplyt
 
-Deplyt 是 PhotoLib 的自动化部署平台和 Go 部署中转服务。PhotoLib 的 GitHub Actions 完成现有 CI 和 Maven 打包后，通过 HTTPS 将现成的 JAR 发给中转机。中转机校验令牌、文件大小、SHA-256 和 PhotoLib JAR 的必需条目，再通过 SSH 传给生产机。生产机校验收到的文件后，执行 PhotoLib 原有的维护模式、切换 JAR 和重启流程。只有重启完成且 `photolib` 服务通过状态检查，HTTP 请求才会返回 `200`。
+Deplyt 是 PhotoLib 的自动化部署平台。控制台跟随 PhotoLib 当前生效的自定义或定时图标，使用 PhotoLib 账号登录。获得授权的成员可以触发 GitHub Actions、部署指定 OSS 制品和查看发布记录。管理员可以管理访问权限、回滚 OSS 归档并查看仓库活动和安全告警。
 
 ## 安装到 Linux 中转机
 
-用 Go 1.26 或更新版本编译，并在中转机上执行以下安装命令。
+使用 Go 1.26 和 Node 22.12 或更新的 Node 22 构建。Svelte 的 HTML、CSS 和 JS 已嵌入 Go 可执行文件。GitHub Actions 的 Build 工作流也提供 `deplyt-linux-amd64` 产物。
 
 ```sh
-go build -o deplyt .
+npm --prefix frontend ci
+npm --prefix frontend run build
+CGO_ENABLED=0 go build -trimpath -o deplyt .
+```
+
+在中转机安装二进制、配置文件和 systemd 服务。
+
+```sh
 sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin deplyt
 sudo install -d -m 0755 /opt/deplyt
 sudo install -m 0755 deplyt /opt/deplyt/deplyt
@@ -25,57 +32,52 @@ curl -fsS http://127.0.0.1:8080/healthz
 | --- | --- |
 | `DEPLOY_TOKEN` | 上传令牌。可用 `openssl rand -hex 32` 生成，和 Actions Secret 使用同一个值。 |
 | `DEPLOY_LISTEN_ADDR` | 监听地址，默认 `127.0.0.1:8080`，供同机 HTTPS 反向代理使用。 |
-| `PHOTOLIB_BASE_URL` | PhotoLib 的 HTTPS 站点地址。Deplyt 跟随 PhotoLib 当前生效的品牌图标，包括定时图标。 |
-| `DEPLOY_ADMIN_PHOTOLIB_ID` | Deplyt 管理员的 PhotoLib 用户数字 ID。留空仅开放中转接口，控制台待配置。 |
-| `DEPLOY_STATE_DIR` | 控制台权限数据目录。systemd 下默认 `/var/lib/deplyt`，直接运行默认 `./state`。目录须由服务账号可写。 |
-| `GITHUB_ACTIONS_TOKEN` | 仅授权 PhotoLib 仓库、带 `Actions: write` 权限的 GitHub fine-grained token，用于触发工作流。 |
 | `PRODUCTION_SSH_HOST` | 生产机 IP。填中转机可达的地址，可以使用内网 IP。 |
 | `PRODUCTION_SSH_PORT` | 生产机 SSH 端口，默认 `22`。 |
 | `PRODUCTION_SSH_USER` | 现有生产部署用户，默认 `root`。该用户需要能写入 `/opt/Photolib`、执行维护命令、切换 JAR 的属主权限及管理 `photolib` 服务。 |
 | `PRODUCTION_SSH_PASSWORD` | 生产机 SSH 密码。用单引号保留 `$`、`#` 等字符。 |
 | `PRODUCTION_SSH_HOST_KEY` | 从可信渠道取得的生产机 SSH host 公钥整行，例如读取生产机的 `/etc/ssh/ssh_host_ed25519_key.pub` 后用单引号包住内容。SSH 握手会固定校验该公钥。 |
+| `OSS_BUCKET` | PhotoLib 当前使用的私有 Bucket。 |
+| `OSS_REGION` | Bucket 所在地域，例如 `cn-hangzhou`。 |
+| `OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` | Deplyt 专用 RAM 凭据，仅需访问下述 JAR 前缀。 |
+| `OSS_ECS_RAM_ROLE` | 在阿里云 ECS 上部署时，可填实例绑定的 RAM 角色名。SDK 自动取得并更新临时凭据。此模式无需填写 AccessKey。 |
+| `DEPLYT_PUBLIC_URL`、`PHOTOLIB_PUBLIC_URL` | Deplyt 和 PhotoLib 的 HTTPS 源地址，例如 `https://deploy.example.com`，带非默认端口时需填写端口。 |
+| `DEPLOY_ADMIN_PHOTOLIB_ID` | Deplyt 管理员的 PhotoLib 用户数字 ID。配置后仅该账号管理 Deplyt。 |
+| `DEPLYT_SSO_SECRET` | 可选的 PhotoLib 管理员单点登录密钥。通过 `openssl rand -hex 32` 生成，并在 PhotoLib 和 Deplyt 填入相同值。 |
+| `GITHUB_TOKEN` | 仅在 Deplyt 后端使用，限定到 `tobby888/Photolib` 的细粒度 PAT。 |
+| `GITHUB_ACTIONS_TOKEN` | 限定到 PhotoLib 仓库、具有 `Actions: write` 权限的细粒度 PAT。启用控制台的手动工作流。 |
+| `DEPLOY_STATE_DIR` | 部署记录与访问权限目录。systemd 默认使用 `/var/lib/deplyt`，手动运行默认使用当前目录的 `data/`。升级时保留该目录。 |
 
-生产机需继续提供现有的 `maint-on`、`maint-off` 和 `photolib.service`，以及 `bash` 和 `sha256sum`。中转机要能连到生产机的 SSH 端口。
+## OSS 归档与回滚
 
-## 控制台登录和授权
+配置归档凭据后，CI 和手动 OSS 部署都会将校验通过的 JAR 归档到私有 OSS，随后通过 SSH 让生产机使用签名 URL 下载。生产机会重新校验 SHA-256，再切换 JAR、重启服务并检查 systemd 状态。
 
-打开 Deplyt 的 HTTPS 地址，点“使用 PhotoLib 登录”，在 PhotoLib 的批准页输入 Deplyt 显示的配对码，再回到 Deplyt 检查批准结果。账号首次验证后会进入 Deplyt 的访问名单。配置的管理员登录后可在“PhotoLib 账号访问权限”内授予或撤销权限，成员刷新页面即可看到结果。
+1. 为共享 Bucket 开启[传输加速](https://www.alibabacloud.com/help/en/oss/user-guide/transfer-acceleration)。Deplyt 使用 `<bucket>.oss-accelerate.aliyuncs.com` 上传与签名，两个服务器均需能访问该地址。PhotoLib 继续使用原有 OSS 配置。
+2. 仅授予 Deplyt 凭据对 `deplyt/photolib/*` 的 `oss:PutObject` 和 `oss:GetObject`。确保 Bucket 生命周期规则对该前缀永久保留，且不会转到需要解冻的存储类型。
+3. 对象键为 `deplyt/photolib/photolib-backend-<run-id>-<部署记录ID>-<完整sha256>.jar`。每次 CI 上传分配独立 ID，重跑也会保留自己的归档。对象按私有 ACL 写入。部署失败或回滚都保留已上传的对象。
+4. 生产机需提供 `curl`、`bash`、`sha256sum`、`flock`、现有的 `maint-on`、`maint-off` 和 `photolib.service`。目录 `/opt/Photolib` 应仅有一个匹配 `photolib-backend-*.jar` 的运行包。切换过程中临时把旧包移出匹配范围，新服务启动失败时尝试恢复旧包。
+5. 控制台可选择曾部署成功的归档，确认后从原对象下载并校验，再执行同一套切换流程。回滚记录保留原 SHA-256、来源提交、运行编号和操作管理员。控制台显示最后确认版本，超时或进程中断后可通过日志核实生产状态。首次上线前的部署没有 Deplyt 记录。
 
-Deplyt 以 PhotoLib 用户 ID 识别账号，访问名单保存在状态目录的 `access.json` 中。登录会话保存在进程内，重启后须重新登录。更新了 `deplyt.service` 的现有实例需要重新安装 unit、执行 `systemctl daemon-reload` 并重启服务。
-
-配置 `GITHUB_ACTIONS_TOKEN` 后，已获准的账号可点“触发部署工作流”，运行 PhotoLib `master` 上的 `build.yml`。控制台会提供 GitHub Actions 链接。GitHub 接受触发后，仍需要等待工作流完成构建、测试和部署。
-
-将控制台和静态资源转发到中转服务，并保留浏览器访问的 Host。以下 Nginx 片段放在同一 HTTPS `server` 块内。
-
-```nginx
-location / {
-    proxy_set_header Host $http_host;
-    proxy_pass http://127.0.0.1:8080;
-}
-```
-
-## 从 OSS 部署已构建的制品
-
-已有通过测试的 PhotoLib JAR 时，可以配置 OSS 制品入口。管理员或已授权成员点“部署 OSS 制品”后，Deplyt 会下载配置的对象，验证 SHA-256 和必需的 JAR 条目，再通过同一条 SSH 部署链路发布到生产环境。OSS 与 Actions 的上传请求共用部署锁。
+## 使用令牌部署 OSS 制品
 
 | 配置 | 用途 |
 | --- | --- |
-| `OSS_ARTIFACT_URL` | 对象的 HTTPS 下载 URL。直连私有 OSS 时填完整的 `GetObject` 预签名 URL，保留签名查询参数，并用单引号包住。 |
-| `OSS_ARTIFACT_NAME` | 可选。默认取 URL 路径中的文件名。如果下载端点的路径不含文件名，则填 `photolib-backend-*.jar` 格式的真实文件名。 |
-| `OSS_ARTIFACT_SHA256` | 从可信构建产物计算的 SHA-256。换制品时与 URL 一并更新。 |
-| `OSS_ACCESS_TOKEN` | 下载端点接受 Bearer 认证时填写，Deplyt 通过 `Authorization: Bearer` 发送。直连 OSS 使用预签名 URL 时留空。 |
+| `OSS_ARTIFACT_URL` | HTTPS 对象下载 URL。私有 OSS 使用完整的 GetObject 预签名 URL，并保留签名参数。 |
+| `OSS_ARTIFACT_NAME` | 可选，默认为 URL 中的文件名。下载端点的路径缺少文件名时，填实际的 `photolib-backend-*.jar` 文件名。 |
+| `OSS_ARTIFACT_SHA256` | 可信构建产物的 SHA-256。更新对象时一并更新。 |
+| `OSS_ACCESS_TOKEN` | 下载端点支持 Bearer 认证时填写。Deplyt 会发送 `Authorization: Bearer`。使用预签名 URL 时留空。 |
 
-Deplyt 无需配置阿里云 AccessKey。标准 OSS 的 STS SecurityToken 需要与临时 AccessKey 配合签名，可由凭证持有方生成预签名 URL 后交给 Deplyt。URL 或 Bearer Token 到期后，在 `.env` 中替换并重启服务。留空以上配置可关闭 OSS 按钮。
+配置后，已授权成员可点「部署 OSS 制品」。Deplyt 会校验文件大小、SHA-256 和 JAR 必需条目。仅配置制品下载时，手动 OSS 部署和 CI 上传都通过 SSH 直接中转校验后的 JAR。配置归档凭据后可回滚到已成功部署并归档的版本。标准 OSS 的 STS SecurityToken 需与临时 AccessKey 配合签名，可以由凭证持有方提供预签名 URL。
 
-OSS 按钮会等待部署完成。使用 Nginx 时，在同一 HTTPS `server` 内配置以下超时。
+## PhotoLib 账号授权与 GitHub
 
-```nginx
-location = /deploy/oss {
-    proxy_set_header Host $http_host;
-    proxy_read_timeout 60m;
-    proxy_pass http://127.0.0.1:8080;
-}
-```
+成员在 Deplyt 点「使用 PhotoLib 登录」，到 PhotoLib 批准配对，再回到 Deplyt 检查结果。首次验证后，账号会显示在管理员的「访问权限」页。管理员可在该页授予或撤销权限，成员刷新即可看到结果。回滚和仓库活动仍由 Deplyt 管理员操作。
+
+如果使用原有的 PhotoLib 管理员单点登录，请在 PhotoLib 部署配套变更并配置相同的 `DEPLYT_PUBLIC_URL` 与 `DEPLYT_SSO_SECRET`。回调路径为 `/auth/callback`。未指定 `DEPLOY_ADMIN_PHOTOLIB_ID` 时，通过该单点登录验证的 PhotoLib 管理员可以管理 Deplyt。
+
+为 `GITHUB_TOKEN` 授予 Contents、Pull requests、Actions、Dependabot alerts、Code scanning alerts、Secret scanning alerts 的 Read 权限。GitHub 仓库需启用对应扫描功能，控制台会在相应板块显示权限或功能错误。凭据扫描页只展示告警元数据。[GitHub PAT 权限文档](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
+
+配置 `GITHUB_ACTIONS_TOKEN` 后，已授权成员可手动触发 PhotoLib `master` 上的 `build.yml`，并在 GitHub 查看运行进度。
 
 ## 连接 PhotoLib 的 GitHub Actions
 
@@ -87,9 +89,19 @@ location = /deploy/oss {
 | Secret | `PHOTOLIB_DEPLOY_TOKEN` | 中转机 `.env` 中的 `DEPLOY_TOKEN`。 |
 | Variable（可选） | `PHOTOLIB_DEPLOY_RUNNER` | 中转机仅在内网可达时，填能访问它的 Linux self-hosted runner 专用标签。留空时使用 `ubuntu-latest`。 |
 
-在中转机的 HTTPS 反向代理中配置部署入口。使用内网 CA 时，将其根证书加入部署 runner 的信任库。以下 Nginx 片段放在现有 HTTPS `server` 块内。默认 JAR 上限是 512 MiB，CI 最多等待一小时。
+在中转机的 HTTPS 反向代理中配置部署入口。使用内网 CA 时，将其根证书加入部署 runner 的信任库。以下 Nginx 片段放在 Deplyt 域名的 HTTPS `server` 块内。控制台与上传接口共用域名，默认 JAR 上限是 512 MiB，CI 和回滚最多等待一小时。
 
 ```nginx
+location / {
+    proxy_read_timeout 60m;
+    proxy_pass http://127.0.0.1:8080;
+}
+
+location = /auth/callback {
+    access_log off;
+    proxy_pass http://127.0.0.1:8080;
+}
+
 location = /v1/deploy/photolib {
     client_max_body_size 512m;
     client_body_timeout 12m;
@@ -101,4 +113,16 @@ location = /v1/deploy/photolib {
 }
 ```
 
-部署接口是 `POST /v1/deploy/photolib`，请求体为原始 JAR 字节。请求头包括 `Authorization: Bearer <token>`、`X-Artifact-Name`、`X-Artifact-SHA256` 和 `X-Deploy-Run-ID`。中转服务单实例串行处理部署，正在处理时的新请求返回 `409`。通过校验的请求会继续执行，即使调用方断开。网络中断时可在 `journalctl -u deplyt` 中用 `run_id` 核实部署结果，再决定是否重跑工作流。
+部署接口是 `POST /v1/deploy/photolib`，请求体为原始 JAR 字节。请求头包括 `Authorization: Bearer <token>`、`X-Artifact-Name`、`X-Artifact-SHA256` 和 `X-Deploy-Run-ID`。工作流也可传入 `X-Deploy-Commit`，将上传关联到提交 SHA。中转服务单实例串行处理部署，正在处理时的新请求返回 `409`。通过校验的请求会继续执行，即使调用方断开。网络中断时可在 `journalctl -u deplyt` 中用 `run_id` 核实部署结果，再决定是否重跑工作流。
+
+## 本地验证
+
+```sh
+npm --prefix frontend ci
+npm --prefix frontend run build
+go test -race ./...
+go vet ./...
+bash -n restart.sh
+```
+
+测试中的 OSS、SSH、PhotoLib 和 GitHub 使用本地替身。

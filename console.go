@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -14,10 +13,23 @@ import (
 
 const (
 	pairingCookie = "__Host-deplyt-pairing"
-	sessionCookie = "__Host-deplyt-session"
 	pairingTTL    = 10 * time.Minute
-	sessionTTL    = 8 * time.Hour
+	memberTTL     = 8 * time.Hour
 )
+
+type accessLevel int
+
+const (
+	authenticatedAccess accessLevel = iota
+	grantedAccess
+	adminAccess
+)
+
+type consoleIdentity struct {
+	administrator
+	Admin   bool `json:"admin"`
+	Allowed bool `json:"allowed"`
+}
 
 type pairing struct {
 	mu       sync.Mutex
@@ -28,262 +40,217 @@ type pairing struct {
 
 type consoleSession struct {
 	mu        sync.Mutex
-	deadline  time.Time
 	expiresAt time.Time
-	userID    int64
 	tokens    photoLibTokens
 }
 
-type console struct {
-	photo    photoLibClient
-	access   *accessRegistry
-	logger   *slog.Logger
-	workflow *workflowDispatch
-	oss      *ossDeployment
-	mu       sync.Mutex
-	pairing  map[string]*pairing
-	session  map[string]*consoleSession
+type loginView struct {
+	SSO        bool   `json:"sso"`
+	PairingURL string `json:"pairingURL,omitempty"`
+	Code       string `json:"code,omitempty"`
 }
 
-func newConsole(photo photoLibClient, access *accessRegistry, logger *slog.Logger) *console {
-	return &console{
-		photo: photo, access: access, logger: logger,
-		pairing: make(map[string]*pairing),
-		session: make(map[string]*consoleSession),
+func (a *consoleAuth) writeLogin(w http.ResponseWriter, p *pairing) {
+	view := loginView{SSO: a.secret != ""}
+	if p != nil && p.data.DeviceCode != "" {
+		view.PairingURL = a.photo.authorizationURL(p.data.RequestID)
+		view.Code = p.data.UserCode
 	}
+	writeJSON(w, view)
 }
 
-func (c *console) register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /{$}", c.home)
-	mux.HandleFunc("GET /login", c.login)
-	mux.HandleFunc("POST /login/start", c.startLogin)
-	mux.HandleFunc("POST /login/finish", c.finishLogin)
-	mux.HandleFunc("POST /logout", c.logout)
-	mux.HandleFunc("POST /access/{id}/{action}", c.updateAccess)
-	mux.HandleFunc("POST /deploy/workflow", c.deployWorkflow)
-	mux.HandleFunc("POST /deploy/oss", c.deployOSS)
+func (a *consoleAuth) loginView(w http.ResponseWriter, r *http.Request) {
+	p := a.findPairing(r)
+	if p != nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+	}
+	a.writeLogin(w, p)
 }
 
-func (c *console) home(w http.ResponseWriter, r *http.Request) {
-	user, ok := c.authenticate(w, r)
-	if !ok {
+func (a *consoleAuth) startPairing(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Origin") != a.origin {
+		http.Error(w, "请求来源无效", http.StatusForbidden)
 		return
 	}
-	data := page{Title: "PhotoLib 部署", User: &user, Admin: user.ID == c.access.admin}
-	if !c.access.allowed(user.ID) {
-		data.Title = "等待授权"
-		data.Message = "已识别你的 PhotoLib 账号。管理员可以在 Deplyt 授予访问权限。获准后刷新此页。"
-		renderPage(w, http.StatusForbidden, data)
+	if a.findPairing(r) != nil {
+		a.loginView(w, r)
 		return
 	}
-	if data.Admin {
-		data.Accounts = c.access.list()
-	}
-	data.Deployment = true
-	data.WorkflowEnabled = c.workflow != nil
-	if c.oss != nil {
-		data.OSSArtifact = c.oss.artifact.name
-	}
-	renderPage(w, http.StatusOK, data)
-}
-
-func (c *console) login(w http.ResponseWriter, r *http.Request) {
-	pending := c.findPairing(cookieValue(r, pairingCookie))
-	if pending == nil {
-		renderPage(w, http.StatusOK, page{Title: "登录 Deplyt", Login: true})
-		return
-	}
-	pending.mu.Lock()
-	defer pending.mu.Unlock()
-	renderPage(w, http.StatusOK, c.pairingPage(pending.data, ""))
-}
-
-func (c *console) pairingPage(data photoLibPairing, message string) page {
-	return page{
-		Title: "在 PhotoLib 批准登录", Message: message,
-		PairingURL: c.photo.authorizationURL(data.RequestID), PairingCode: data.UserCode,
-	}
-}
-
-func (c *console) startLogin(w http.ResponseWriter, r *http.Request) {
-	if c.findPairing(cookieValue(r, pairingCookie)) != nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-	id := rand.Text()
-	pending := &pairing{deadline: time.Now().Add(pairingTTL)}
-	pending.mu.Lock()
-	defer pending.mu.Unlock()
-	c.mu.Lock()
-	for key, p := range c.pairing {
-		if !time.Now().Before(p.deadline) {
-			delete(c.pairing, key)
+	id := randomToken()
+	now := time.Now()
+	p := &pairing{deadline: now.Add(pairingTTL)}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a.mu.Lock()
+	for key, value := range a.pairings {
+		if !now.Before(value.deadline) {
+			delete(a.pairings, key)
 		}
 	}
-	if len(c.pairing) >= 256 {
-		c.mu.Unlock()
-		renderPage(w, http.StatusTooManyRequests, page{Title: "请稍后登录", Login: true, Message: "当前待批准的登录较多。"})
+	if len(a.pairings) >= 256 {
+		a.mu.Unlock()
+		http.Error(w, "待批准的登录较多，请稍后重试", http.StatusTooManyRequests)
 		return
 	}
-	c.pairing[id] = pending
-	c.mu.Unlock()
-
+	a.pairings[id] = p
+	a.mu.Unlock()
 	input := map[string]string{"clientName": "Deplyt", "deviceLabel": "自动化部署平台"}
-	err := c.photo.call(r.Context(), "/mcp/authorizations", input, "", &pending.data)
-	if err != nil || pending.data.RequestID == "" || pending.data.UserCode == "" ||
-		pending.data.DeviceCode == "" || pending.data.ExpiresIn <= 0 {
-		c.dropPairing(id)
-		renderPage(w, http.StatusBadGateway, page{Title: "暂时无法登录", Login: true, Message: "PhotoLib 未能创建配对，请稍后重试。"})
+	err := a.photo.call(r.Context(), "/mcp/authorizations", input, "", &p.data)
+	if err != nil || p.data.RequestID == "" || p.data.UserCode == "" ||
+		p.data.DeviceCode == "" || p.data.ExpiresIn <= 0 {
+		a.removePairing(id)
+		http.Error(w, "PhotoLib 未能创建配对，请稍后重试", http.StatusBadGateway)
 		return
 	}
-	maxAge := min(pending.data.ExpiresIn, int64(pairingTTL/time.Second))
-	setCookie(w, pairingCookie, id, int(maxAge))
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	authCookie(w, pairingCookie, id, int(min(p.data.ExpiresIn, int64(pairingTTL/time.Second))))
+	a.writeLogin(w, p)
 }
 
-func (c *console) finishLogin(w http.ResponseWriter, r *http.Request) {
-	id := cookieValue(r, pairingCookie)
-	pending := c.findPairing(id)
-	if pending == nil {
-		setCookie(w, pairingCookie, "", -1)
-		renderPage(w, http.StatusUnauthorized, page{Title: "请重新登录", Login: true})
+func (a *consoleAuth) finishPairing(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Origin") != a.origin {
+		http.Error(w, "请求来源无效", http.StatusForbidden)
 		return
 	}
-	pending.mu.Lock()
-	defer pending.mu.Unlock()
-	if pending.data.DeviceCode == "" {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+	p := a.findPairing(r)
+	if p == nil {
+		http.Error(w, "配对已过期，请重新登录", http.StatusUnauthorized)
 		return
 	}
-	if time.Now().Before(pending.pollAt) {
-		renderPage(w, http.StatusTooManyRequests, c.pairingPage(pending.data, "请稍候再检查批准结果。"))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.data.DeviceCode == "" {
+		http.Error(w, "配对已结束，请重新登录", http.StatusUnauthorized)
 		return
 	}
-	pending.pollAt = time.Now().Add(time.Duration(max(2, min(30, pending.data.Interval))) * time.Second)
-	input := map[string]string{"requestId": pending.data.RequestID, "deviceCode": pending.data.DeviceCode}
-	var tokens photoLibTokens
+	if time.Now().Before(p.pollAt) {
+		http.Error(w, "请稍候再检查批准结果", http.StatusTooManyRequests)
+		return
+	}
+	p.pollAt = time.Now().Add(time.Duration(max(2, min(30, p.data.Interval))) * time.Second)
 	ctx := context.WithoutCancel(r.Context())
-	err := c.photo.call(ctx, "/mcp/token", input, "", &tokens)
+	input := map[string]string{"requestId": p.data.RequestID, "deviceCode": p.data.DeviceCode}
+	var tokens photoLibTokens
+	err := a.photo.call(ctx, "/mcp/token", input, "", &tokens)
 	if err == nil && tokens.Status == "PENDING" {
-		renderPage(w, http.StatusAccepted, c.pairingPage(pending.data, "请在 PhotoLib 输入配对码并批准后，再检查结果。"))
+		writeJSON(w, map[string]bool{"approved": false})
 		return
 	}
 	if err != nil && !errors.Is(err, errPhotoLibSession) {
-		renderPage(w, http.StatusBadGateway, c.pairingPage(pending.data, "读取 PhotoLib 批准结果失败，请稍后重试。"))
+		http.Error(w, "暂时无法读取 PhotoLib 批准结果", http.StatusBadGateway)
 		return
 	}
-	c.dropPairing(id)
-	pending.data.DeviceCode = ""
-	setCookie(w, pairingCookie, "", -1)
-	if err != nil || tokens.Status != "APPROVED" || !validTokens(tokens) {
-		renderPage(w, http.StatusUnauthorized, page{Title: "请重新登录", Login: true, Message: "配对已失效或被拒绝。"})
+	a.removePairing(cookieValue(r, pairingCookie))
+	p.data.DeviceCode = ""
+	authCookie(w, pairingCookie, "", -1)
+	if err != nil || tokens.Status != "APPROVED" || !validPhotoTokens(tokens) {
+		http.Error(w, "配对已失效或被拒绝，请重新登录", http.StatusUnauthorized)
 		return
 	}
-	user, err := c.photo.user(ctx, tokens.AccessToken)
+	user, err := a.photo.user(ctx, tokens.AccessToken)
 	if err != nil {
-		c.revokePhotoToken(ctx, tokens.RefreshToken)
-		renderPage(w, http.StatusUnauthorized, page{Title: "无法验证 PhotoLib 账号", Login: true, Message: "请确认你的 PhotoLib 账号可用后重新登录。"})
+		a.revokePhotoToken(ctx, tokens.RefreshToken)
+		http.Error(w, "无法验证 PhotoLib 账号", http.StatusUnauthorized)
 		return
 	}
-	if err := c.access.register(user); err != nil {
-		c.revokePhotoToken(ctx, tokens.RefreshToken)
-		c.logger.Error("save verified account", "user_id", user.ID, "error", err)
-		renderPage(w, http.StatusInternalServerError, page{Title: "无法保存账号", Login: true})
+	if err := a.access.register(user); err != nil {
+		a.revokePhotoToken(ctx, tokens.RefreshToken)
+		http.Error(w, "无法保存 PhotoLib 账号", http.StatusInternalServerError)
 		return
 	}
-	sessionID := c.openSession(user.ID, tokens)
-	if sessionID == "" {
-		c.revokePhotoToken(ctx, tokens.RefreshToken)
-		renderPage(w, http.StatusServiceUnavailable, page{Title: "请稍后登录", Login: true})
+	session := adminSession{
+		administrator: administrator{ID: strconv.FormatInt(user.ID, 10), Username: user.Username},
+		privileged:    user.ID == a.access.admin,
+		photo:         &consoleSession{},
+	}
+	session.photo.setTokens(tokens)
+	if !a.setSession(w, r, session, memberTTL) {
+		a.revokePhotoToken(ctx, tokens.RefreshToken)
+		http.Error(w, "会话较多，请稍后登录", http.StatusServiceUnavailable)
 		return
 	}
-	c.closeSession(ctx, cookieValue(r, sessionCookie))
-	setCookie(w, sessionCookie, sessionID, int(sessionTTL/time.Second))
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	writeJSON(w, map[string]bool{"approved": true})
 }
 
-func (c *console) findPairing(id string) *pairing {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	p := c.pairing[id]
+func (a *consoleAuth) findPairing(r *http.Request) *pairing {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p := a.pairings[cookieValue(r, pairingCookie)]
 	if p != nil && time.Now().Before(p.deadline) {
 		return p
 	}
 	return nil
 }
 
-func (c *console) dropPairing(id string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.pairing, id)
+func (a *consoleAuth) removePairing(id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.pairings, id)
 }
 
-func (c *console) openSession(userID int64, tokens photoLibTokens) string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := time.Now()
-	for id, session := range c.session {
-		if !now.Before(session.deadline) {
-			delete(c.session, id)
+func (a *consoleAuth) setSession(w http.ResponseWriter, r *http.Request, session adminSession, ttl time.Duration) bool {
+	a.dropSession(r)
+	now, token := time.Now(), randomToken()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for id, active := range a.sessions {
+		if !now.Before(active.expires) {
+			delete(a.sessions, id)
 		}
 	}
-	if len(c.session) >= 1024 {
-		return ""
+	if len(a.sessions) >= 1024 {
+		return false
 	}
-	id := rand.Text()
-	session := &consoleSession{userID: userID, deadline: now.Add(sessionTTL)}
-	session.setTokens(tokens)
-	c.session[id] = session
-	return id
+	session.expires = now.Add(ttl)
+	a.sessions[token] = session
+	authCookie(w, sessionCookie, token, int(ttl/time.Second))
+	return true
 }
 
-func (c *console) authenticate(w http.ResponseWriter, r *http.Request) (photoLibUser, bool) {
+func (a *consoleAuth) identity(r *http.Request) (consoleIdentity, error) {
 	id := cookieValue(r, sessionCookie)
-	c.mu.Lock()
-	session := c.session[id]
-	c.mu.Unlock()
-	if session != nil {
-		user, err := c.verifySession(r.Context(), session)
-		if err == nil {
-			return user, true
-		}
-		if !errors.Is(err, errPhotoLibSession) {
-			renderPage(w, http.StatusBadGateway, page{Title: "暂时无法验证账号", Message: "PhotoLib 暂时不可用，请稍后刷新。"})
-			return photoLibUser{}, false
-		}
-		c.closeSession(context.WithoutCancel(r.Context()), id)
+	a.mu.Lock()
+	session, ok := a.sessions[id]
+	a.mu.Unlock()
+	if !ok || !time.Now().Before(session.expires) {
+		return consoleIdentity{}, errPhotoLibSession
 	}
-	setCookie(w, sessionCookie, "", -1)
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
-	return photoLibUser{}, false
+	if session.photo != nil {
+		user, err := a.verifyPhotoSession(r.Context(), session.photo)
+		if err != nil {
+			return consoleIdentity{}, err
+		}
+		if strconv.FormatInt(user.ID, 10) != session.ID {
+			return consoleIdentity{}, errPhotoLibSession
+		}
+		session.Username = user.Username
+	}
+	userID, _ := strconv.ParseInt(session.ID, 10, 64)
+	allowed := session.privileged || (userID > 0 && a.access != nil && a.access.allowed(userID))
+	return consoleIdentity{administrator: session.administrator, Admin: session.privileged, Allowed: allowed}, nil
 }
 
-func (c *console) verifySession(ctx context.Context, session *consoleSession) (photoLibUser, error) {
+func (a *consoleAuth) verifyPhotoSession(ctx context.Context, session *consoleSession) (photoLibUser, error) {
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if !time.Now().Before(session.deadline) || session.tokens.AccessToken == "" {
+	if session.tokens.AccessToken == "" {
 		return photoLibUser{}, errPhotoLibSession
 	}
 	if time.Until(session.expiresAt) <= 15*time.Second {
 		var refreshed photoLibTokens
 		input := map[string]string{"refreshToken": session.tokens.RefreshToken}
-		// PhotoLib rotates the refresh token. Retain the replacement if the browser disconnects.
-		if err := c.photo.call(context.WithoutCancel(ctx), "/mcp/token/refresh", input, "", &refreshed); err != nil {
+		if err := a.photo.call(context.WithoutCancel(ctx), "/mcp/token/refresh", input, "", &refreshed); err != nil {
 			return photoLibUser{}, err
 		}
-		if !validTokens(refreshed) {
+		if !validPhotoTokens(refreshed) {
 			return photoLibUser{}, errPhotoLibSession
 		}
 		session.setTokens(refreshed)
 	}
-	user, err := c.photo.user(ctx, session.tokens.AccessToken)
-	if err == nil && user.ID != session.userID {
-		return photoLibUser{}, errPhotoLibSession
-	}
-	return user, err
+	return a.photo.user(ctx, session.tokens.AccessToken)
 }
 
-func validTokens(tokens photoLibTokens) bool {
+func validPhotoTokens(tokens photoLibTokens) bool {
 	return tokens.AccessToken != "" && tokens.RefreshToken != "" && tokens.ExpiresIn > 0
 }
 
@@ -292,58 +259,45 @@ func (s *consoleSession) setTokens(tokens photoLibTokens) {
 	s.expiresAt = time.Now().Add(time.Duration(min(tokens.ExpiresIn, 3600)) * time.Second)
 }
 
-func (c *console) logout(w http.ResponseWriter, r *http.Request) {
-	c.closeSession(context.WithoutCancel(r.Context()), cookieValue(r, sessionCookie))
-	setCookie(w, sessionCookie, "", -1)
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
-}
-
-func (c *console) closeSession(ctx context.Context, id string) {
-	c.mu.Lock()
-	session := c.session[id]
-	delete(c.session, id)
-	c.mu.Unlock()
-	if session != nil {
-		session.mu.Lock()
-		refreshToken := session.tokens.RefreshToken
-		session.tokens = photoLibTokens{}
-		session.mu.Unlock()
-		c.revokePhotoToken(ctx, refreshToken)
+func (a *consoleAuth) dropSession(r *http.Request) {
+	id := cookieValue(r, sessionCookie)
+	a.mu.Lock()
+	session := a.sessions[id]
+	delete(a.sessions, id)
+	a.mu.Unlock()
+	if session.photo != nil {
+		session.photo.mu.Lock()
+		token := session.photo.tokens.RefreshToken
+		session.photo.tokens = photoLibTokens{}
+		session.photo.mu.Unlock()
+		a.revokePhotoToken(context.WithoutCancel(r.Context()), token)
 	}
 }
 
-func (c *console) revokePhotoToken(ctx context.Context, token string) {
-	if err := c.photo.call(ctx, "/mcp/token/revoke", map[string]string{"refreshToken": token}, "", nil); err != nil {
-		c.logger.Warn("could not revoke Deplyt's PhotoLib pairing")
-	}
+func (a *consoleAuth) revokePhotoToken(ctx context.Context, token string) {
+	_ = a.photo.call(ctx, "/mcp/token/revoke", map[string]string{"refreshToken": token}, "", nil)
 }
 
-func (c *console) updateAccess(w http.ResponseWriter, r *http.Request) {
-	user, ok := c.authenticate(w, r)
-	if !ok {
-		return
-	}
-	if user.ID != c.access.admin {
-		renderPage(w, http.StatusForbidden, page{Title: "需要 Deplyt 管理员权限"})
-		return
-	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	action := r.PathValue("action")
-	if err != nil || id <= 0 || (action != "grant" && action != "revoke") {
-		http.NotFound(w, r)
-		return
-	}
-	if err := c.access.update(id, action == "grant"); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			renderPage(w, http.StatusNotFound, page{Title: "未找到可管理的 PhotoLib 账号"})
-		} else {
-			c.logger.Error("save access change", "user_id", id, "error", err)
-			renderPage(w, http.StatusInternalServerError, page{Title: "权限保存失败"})
+func (a *consoleAuth) updateAccess(logger *slog.Logger) func(http.ResponseWriter, *http.Request, administrator) {
+	return func(w http.ResponseWriter, r *http.Request, admin administrator) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		action := r.PathValue("action")
+		if err != nil || id <= 0 || (action != "grant" && action != "revoke") {
+			http.NotFound(w, r)
+			return
 		}
-		return
+		if err := a.access.update(id, action == "grant"); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.Error(w, "未找到可管理的 PhotoLib 账号", http.StatusNotFound)
+			} else {
+				logger.Error("save access change", "user_id", id, "error", err)
+				http.Error(w, "权限保存失败", http.StatusInternalServerError)
+			}
+			return
+		}
+		logger.Info("Deplyt access updated", "admin_id", admin.ID, "user_id", id, "action", action)
+		w.WriteHeader(http.StatusNoContent)
 	}
-	c.logger.Info("Deplyt access updated", "admin_id", user.ID, "user_id", id, "action", action)
-	http.Redirect(w, r, "/#access", http.StatusSeeOther)
 }
 
 func cookieValue(r *http.Request, name string) string {
@@ -352,11 +306,4 @@ func cookieValue(r *http.Request, name string) string {
 		return ""
 	}
 	return cookie.Value
-}
-
-func setCookie(w http.ResponseWriter, name, value string, maxAge int) {
-	http.SetCookie(w, &http.Cookie{
-		Name: name, Value: value, MaxAge: maxAge,
-		Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
-	})
 }

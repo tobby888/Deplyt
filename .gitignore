@@ -3,4 +3,6 @@
 !.env.example
 /deplyt
 /deplyt.exe
-/state/
+
+/data/
+/webui/dist/

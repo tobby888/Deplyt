@@ -1,197 +1,109 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
+	"time"
 )
 
-func TestPhotoLibLoginAndDynamicAccess(t *testing.T) {
-	var pairingCount atomic.Int64
-	photoLib := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestPairedPhotoLibAccountRequiresDeplytGrant(t *testing.T) {
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var data any
 		switch r.URL.Path {
 		case "/api/v1/auth/mcp/authorizations":
-			id := pairingCount.Add(1)
-			data = map[string]any{
-				"requestId": fmt.Sprint(id), "deviceCode": fmt.Sprintf("device-%d", id),
-				"userCode": "PAIR-CODE", "expiresIn": 600, "interval": 2,
-			}
+			data = photoLibPairing{RequestID: "pairing-id", DeviceCode: "private-device-code", UserCode: "PAIR-CODE", ExpiresIn: 600, Interval: 2}
 		case "/api/v1/auth/mcp/token":
 			var input map[string]string
-			if err := json.NewDecoder(r.Body).Decode(&input); err != nil ||
-				input["deviceCode"] != "device-"+input["requestId"] {
-				http.Error(w, "invalid device", http.StatusBadRequest)
-				return
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input["deviceCode"] != "private-device-code" {
+				t.Error("missing server-side device code")
 			}
-			data = map[string]any{
-				"status": "APPROVED", "accessToken": "token-" + input["requestId"],
-				"refreshToken": "refresh-" + input["requestId"], "expiresIn": 900,
-			}
+			data = photoLibTokens{Status: "APPROVED", AccessToken: "access", RefreshToken: "refresh", ExpiresIn: 900}
 		case "/api/v1/auth/me":
-			switch r.Header.Get("Authorization") {
-			case "Bearer token-1":
-				data = photoLibUser{ID: 11, Username: "photo-owner"}
-			case "Bearer token-2":
-				data = photoLibUser{ID: 27, Username: "photo-member", DisplayName: "<Photo Member>"}
-			default:
-				http.Error(w, "invalid session", http.StatusUnauthorized)
-				return
+			if r.Header.Get("Authorization") != "Bearer access" {
+				t.Error("missing PhotoLib access token")
 			}
-		case "/api/v1/auth/mcp/token/revoke":
+			data = photoLibUser{ID: 27, Username: "member"}
 		default:
 			http.NotFound(w, r)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"code": "OK", "data": data})
+		writeJSON(w, map[string]any{"code": "OK", "data": data})
 	}))
-	defer photoLib.Close()
+	defer provider.Close()
 
-	dir := t.TempDir()
-	access, err := openAccessRegistry(dir, photoLib.URL, 11)
+	auth, err := newConsoleAuth(map[string]string{"DEPLYT_PUBLIC_URL": "https://deploy.example.test", "PHOTOLIB_PUBLIC_URL": provider.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux := http.NewServeMux()
-	c := newConsole(photoLibClient{photoLib.URL, photoLib.Client()}, access, slog.New(slog.DiscardHandler))
-	var dispatchCount atomic.Int64
+	auth.photo.http = provider.Client()
+	dir := t.TempDir()
+	auth.access, err = openAccessRegistry(dir, provider.URL, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.DiscardHandler)
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input["ref"] != "master" ||
-			r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer test-github-token" {
-			http.Error(w, "invalid workflow dispatch", http.StatusBadRequest)
-			return
+			r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Error("unexpected GitHub dispatch request")
 		}
-		dispatchCount.Add(1)
-		_, _ = io.WriteString(w, `{"workflow_run_id":1234}`)
+		_, _ = w.Write([]byte(`{"workflow_run_id":1234}`))
 	}))
 	defer github.Close()
-	c.workflow = &workflowDispatch{endpoint: github.URL, token: "test-github-token", client: github.Client()}
-	jarData := testJAR(t)
-	var ossDeployCount atomic.Int64
-	oss := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer test-oss-token" {
-			http.Error(w, "invalid OSS access token", http.StatusUnauthorized)
-			return
-		}
-		_, _ = w.Write(jarData)
-	}))
-	defer oss.Close()
-	c.oss = &ossDeployment{
-		artifact: &ossArtifact{url: oss.URL, name: testJARName, token: "test-oss-token", checksum: make([]byte, sha256.Size)},
-		client:   oss.Client(),
-		relay: &relay{
-			logger: c.logger, maxSize: maxJARSize,
-			deploy: func(_ context.Context, jar artifact, stageID string, _ *slog.Logger) error {
-				got := make([]byte, jar.size)
-				if _, err := jar.file.ReadAt(got, 0); err != nil || !bytes.Equal(jarData, got) || !strings.HasPrefix(stageID, "oss-") {
-					return fmt.Errorf("invalid staged OSS artifact: %v", err)
-				}
-				ossDeployCount.Add(1)
-				return nil
-			},
-		},
-	}
-	c.register(mux)
-	server := httptest.NewTLSServer(http.NewCrossOriginProtection().Handler(mux))
-	defer server.Close()
-
-	admin, member := consoleBrowser(t, server), consoleBrowser(t, server)
-	browseConsole := func(t *testing.T, browser *http.Client, method, path, origin string, want int, contains string) string {
+	dispatch := &workflowDispatch{endpoint: github.URL, token: "test-token", client: github.Client()}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /auth/pairing", auth.startPairing)
+	mux.HandleFunc("POST /auth/pairing/finish", auth.finishPairing)
+	mux.HandleFunc("POST /api/access/{id}/{action}", auth.requireAdmin(auth.updateAccess(logger)))
+	mux.HandleFunc("POST /api/deployments/workflow", auth.protect(grantedAccess, dispatch.handle(logger)))
+	post := func(path, origin string, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
 		t.Helper()
-		return requestConsole(t, browser, method, server.URL+path, origin, want, contains)
-	}
-	browseConsole(t, member, http.MethodGet, "/", "", http.StatusSeeOther, "")
-	browseConsole(t, member, http.MethodPost, "/deploy/workflow", "", http.StatusSeeOther, "")
-	for _, browser := range []*http.Client{admin, member} {
-		browseConsole(t, browser, http.MethodPost, "/login/start", "", http.StatusSeeOther, "")
-		body := browseConsole(t, browser, http.MethodGet, "/login", "", http.StatusOK, "PAIR-CODE")
-		if strings.Contains(body, "device-1") || strings.Contains(body, "device-2") ||
-			!strings.Contains(body, photoLib.URL+"/mcp/authorize?request=") {
-			t.Fatal("unexpected PhotoLib pairing page")
+		r := httptest.NewRequest(http.MethodPost, path, nil)
+		r.Header.Set("Origin", origin)
+		if cookie != nil {
+			r.AddCookie(cookie)
 		}
-		browseConsole(t, browser, http.MethodPost, "/login/finish", "", http.StatusSeeOther, "")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s returned %d, want %d: %s", path, w.Code, want, w.Body)
+		}
+		return w
 	}
-	browseConsole(t, member, http.MethodGet, "/", "", http.StatusForbidden, "等待授权")
-	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusForbidden, "")
-	browseConsole(t, member, http.MethodPost, "/deploy/oss", server.URL, http.StatusForbidden, "")
-	browseConsole(t, admin, http.MethodGet, "/", "", http.StatusOK, "&lt;Photo Member&gt;")
-	browseConsole(t, member, http.MethodPost, "/access/27/grant", "", http.StatusForbidden, "")
-	browseConsole(t, admin, http.MethodPost, "/access/999/grant", "", http.StatusNotFound, "")
-	browseConsole(t, admin, http.MethodPost, "/access/27/grant", "https://other.example", http.StatusForbidden, "")
-	browseConsole(t, admin, http.MethodPost, "/access/27/grant", server.URL, http.StatusSeeOther, "")
-	browseConsole(t, member, http.MethodGet, "/", "", http.StatusOK, "触发部署工作流")
-	browseConsole(t, member, http.MethodPost, "/deploy/workflow", "https://other.example", http.StatusForbidden, "")
-	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusAccepted, photoLibGitHub+"/actions/runs/1234")
-	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusConflict, "")
-	browseConsole(t, member, http.MethodPost, "/deploy/oss", server.URL, http.StatusBadGateway, "OSS 部署失败")
-	digest := sha256.Sum256(jarData)
-	c.oss.relay.mu.Lock()
-	c.oss.artifact.checksum = digest[:]
-	browseConsole(t, member, http.MethodPost, "/deploy/oss", server.URL, http.StatusConflict, "")
-	c.oss.relay.mu.Unlock()
-	browseConsole(t, member, http.MethodPost, "/deploy/oss", server.URL, http.StatusOK, "PhotoLib 已部署")
 
-	reloaded, err := openAccessRegistry(dir, photoLib.URL, 11)
+	origin := auth.origin
+	post("/api/deployments/workflow", origin, nil, http.StatusUnauthorized)
+	post("/auth/pairing", "https://elsewhere.test", nil, http.StatusForbidden)
+	login := post("/auth/pairing", origin, nil, http.StatusOK)
+	if strings.Contains(login.Body.String(), "private-device-code") || !strings.Contains(login.Body.String(), "PAIR-CODE") {
+		t.Fatal("unexpected pairing data in browser")
+	}
+	result := post("/auth/pairing/finish", origin, login.Result().Cookies()[0], http.StatusOK)
+	member := result.Result().Cookies()[1]
+	post("/api/deployments/workflow", origin, member, http.StatusForbidden)
+	post("/api/access/27/grant", origin, member, http.StatusForbidden)
+
+	adminPage := httptest.NewRecorder()
+	if !auth.setSession(adminPage, httptest.NewRequest(http.MethodGet, "/", nil),
+		adminSession{administrator: administrator{ID: "11", Username: "admin"}, privileged: true}, time.Minute) {
+		t.Fatal("could not create admin session")
+	}
+	admin := adminPage.Result().Cookies()[0]
+	post("/api/access/999/grant", origin, admin, http.StatusNotFound)
+	post("/api/access/27/grant", origin, admin, http.StatusNoContent)
+	res := post("/api/deployments/workflow", origin, member, http.StatusAccepted)
+	if !strings.Contains(res.Body.String(), "/actions/runs/1234") {
+		t.Fatalf("missing run link: %s", res.Body)
+	}
+	reloaded, err := openAccessRegistry(dir, provider.URL, 11)
 	if err != nil || !reloaded.allowed(27) {
-		t.Fatalf("grant did not survive registry reload: %v", err)
+		t.Fatalf("grant did not survive restart: %v", err)
 	}
-	browseConsole(t, admin, http.MethodPost, "/access/27/revoke", server.URL, http.StatusSeeOther, "")
-	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusForbidden, "")
-	browseConsole(t, member, http.MethodPost, "/deploy/oss", server.URL, http.StatusForbidden, "")
-	browseConsole(t, member, http.MethodGet, "/", "", http.StatusForbidden, "等待授权")
-	browseConsole(t, member, http.MethodPost, "/logout", server.URL, http.StatusSeeOther, "")
-	browseConsole(t, member, http.MethodGet, "/", "", http.StatusSeeOther, "")
-	if dispatchCount.Load() != 1 {
-		t.Fatalf("expected a single GitHub dispatch, got %d", dispatchCount.Load())
-	}
-	if ossDeployCount.Load() != 1 {
-		t.Fatalf("expected a single verified OSS deployment, got %d", ossDeployCount.Load())
-	}
-}
-
-func consoleBrowser(t *testing.T, server *httptest.Server) *http.Client {
-	t.Helper()
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := outboundClient(0)
-	client.Transport = server.Client().Transport
-	client.Jar = jar
-	return client
-}
-
-func requestConsole(t *testing.T, client *http.Client, method, endpoint, origin string, want int, contains string) string {
-	t.Helper()
-	req, err := http.NewRequest(method, endpoint, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if origin != "" {
-		req.Header.Set("Origin", origin)
-	}
-	res, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	data, err := io.ReadAll(res.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.StatusCode != want || !strings.Contains(string(data), contains) {
-		t.Fatalf("%s %s returned %d, want %d containing %q\n%s", method, endpoint, res.StatusCode, want, contains, data)
-	}
-	return string(data)
+	post("/api/access/27/revoke", origin, admin, http.StatusNoContent)
+	post("/api/deployments/workflow", origin, member, http.StatusForbidden)
 }

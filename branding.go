@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +14,9 @@ import (
 )
 
 const maxBrandIconBytes = 6 << 20
+
+//go:embed web/brand/*.png
+var brandFiles embed.FS
 
 type brandImage struct {
 	contentType string
@@ -127,7 +131,7 @@ func builtinBrandImage(name string) brandImage {
 	default:
 		name = "camera"
 	}
-	body, err := webFiles.ReadFile("web/brand/" + name + ".png")
+	body, err := brandFiles.ReadFile("web/brand/" + name + ".png")
 	if err != nil {
 		panic(err)
 	}

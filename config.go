@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
@@ -15,14 +14,13 @@ import (
 )
 
 type config struct {
-	listenAddr     string
-	token          string
-	production     productionServer
-	photoLibOrigin string
-	adminID        int64
-	stateDir       string
-	githubToken    string
-	ossArtifact    *ossArtifact
+	listenAddr string
+	token      string
+	production productionServer
+	archive    jarArchive
+	manualOSS  *ossArtifact
+	adminID    int64
+	values     map[string]string
 }
 
 func loadConfig(path string) (config, error) {
@@ -59,44 +57,34 @@ func loadConfig(path string) (config, error) {
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
-	origin := values["PHOTOLIB_BASE_URL"]
-	if origin != "" {
-		site, err := parseHTTPSEndpoint(origin)
-		if err != nil || (site.Path != "" && site.Path != "/") || site.RawQuery != "" || site.ForceQuery {
-			return config{}, errors.New("PHOTOLIB_BASE_URL must be an HTTPS origin")
-		}
-		origin = "https://" + strings.ToLower(site.Host)
-	}
-	var adminID int64
-	if setting := values["DEPLOY_ADMIN_PHOTOLIB_ID"]; setting != "" {
-		adminID, err = strconv.ParseInt(setting, 10, 64)
-		if err != nil || adminID <= 0 || origin == "" {
-			return config{}, errors.New("DEPLOY_ADMIN_PHOTOLIB_ID requires a positive PhotoLib user ID and PHOTOLIB_BASE_URL")
-		}
-	}
-	stateDir := values["DEPLOY_STATE_DIR"]
-	if stateDir == "" {
-		stateDir = os.Getenv("STATE_DIRECTORY")
-	}
-	if stateDir == "" {
-		stateDir = "state"
-	}
-	githubToken := values["GITHUB_ACTIONS_TOKEN"]
-	if strings.ContainsAny(githubToken, " \t\r\n") {
-		return config{}, errors.New("GITHUB_ACTIONS_TOKEN must not contain whitespace")
-	}
-	artifact, err := loadOSSArtifact(values)
+	manual, err := loadOSSArtifact(values)
 	if err != nil {
 		return config{}, err
 	}
+	var archive jarArchive
+	if manual == nil || values["OSS_ACCESS_KEY_ID"] != "" || values["OSS_ACCESS_KEY_SECRET"] != "" || values["OSS_ECS_RAM_ROLE"] != "" {
+		archive, err = newArchive(values)
+		if err != nil {
+			return config{}, err
+		}
+	}
+	var adminID int64
+	if value := values["DEPLOY_ADMIN_PHOTOLIB_ID"]; value != "" {
+		adminID, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || adminID <= 0 {
+			return config{}, errors.New("DEPLOY_ADMIN_PHOTOLIB_ID must be a positive PhotoLib user ID")
+		}
+	}
+	if strings.ContainsAny(values["GITHUB_ACTIONS_TOKEN"], " \t\r\n") {
+		return config{}, errors.New("GITHUB_ACTIONS_TOKEN must not contain whitespace")
+	}
 	return config{
-		listenAddr:     addr,
-		token:          token,
-		photoLibOrigin: origin,
-		adminID:        adminID,
-		stateDir:       stateDir,
-		githubToken:    githubToken,
-		ossArtifact:    artifact,
+		archive:    archive,
+		manualOSS:  manual,
+		adminID:    adminID,
+		values:     values,
+		listenAddr: addr,
+		token:      token,
 		production: productionServer{
 			address:  net.JoinHostPort(values["PRODUCTION_SSH_HOST"], port),
 			user:     user,

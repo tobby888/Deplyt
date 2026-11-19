@@ -36,7 +36,7 @@ func TestDeplytUsesEffectivePhotoLibBrandIcon(t *testing.T) {
 	defer photoLib.Close()
 	brand := &branding{origin: photoLib.URL, client: photoLib.Client()}
 	mux := http.NewServeMux()
-	registerWebAssets(mux, brand)
+	mux.HandleFunc("GET /brand-icon", brand.serve)
 	for _, icon := range []struct {
 		display, expectedPath string
 		expectedBytes         []byte

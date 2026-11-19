@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
@@ -26,16 +27,20 @@ var (
 type artifact struct {
 	name   string
 	sha256 string
+	key    string
 	file   *os.File
 	size   int64
 }
 
 type relay struct {
-	token   string
-	maxSize int64
-	logger  *slog.Logger
-	deploy  func(context.Context, artifact, string, *slog.Logger) error
-	mu      sync.Mutex
+	token       string
+	maxSize     int64
+	logger      *slog.Logger
+	archive     func(context.Context, string, string, *os.File) error
+	downloadURL func(context.Context, string) (string, error)
+	deploy      func(context.Context, artifact, string, string, *slog.Logger) error
+	mu          sync.Mutex
+	history     history
 }
 
 func (s *relay) handleDeploy(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +58,11 @@ func (s *relay) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid artifact name, SHA-256, or workflow run ID", http.StatusBadRequest)
 		return
 	}
+	commit := r.Header.Get("X-Deploy-Commit")
+	if commit != "" && !commitPattern.MatchString(commit) {
+		http.Error(w, "invalid commit SHA", http.StatusBadRequest)
+		return
+	}
 	if r.ContentLength > s.maxSize {
 		http.Error(w, "JAR exceeds upload limit", http.StatusRequestEntityTooLarge)
 		return
@@ -64,20 +74,18 @@ func (s *relay) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	logger := s.logger.With("run_id", runID, "artifact", name)
 
-	jar, stageErr := stageArtifact(http.MaxBytesReader(w, r.Body, s.maxSize), name, expectedSum, s.maxSize, logger)
+	staged, stageErr := stageArtifact(http.MaxBytesReader(w, r.Body, s.maxSize), name, expectedSum, s.maxSize, logger)
 	if stageErr != nil {
 		http.Error(w, stageErr.Error(), stageErr.status)
 		return
 	}
-	defer jar.remove(logger)
+	defer staged.remove(logger)
 	if r.Context().Err() != nil {
 		return
 	}
-	if err := s.deployStaged(r.Context(), jar, runID, logger); err != nil {
-		http.Error(w, "production deployment failed; check relay logs for this run ID", http.StatusBadGateway)
-		return
+	if s.publish(w, r.Context(), staged, runID, commit, administrator{}) {
+		_, _ = io.WriteString(w, "PhotoLib deployed\n")
 	}
-	_, _ = io.WriteString(w, "PhotoLib deployed\n")
 }
 
 type stagingError struct {
@@ -136,18 +144,65 @@ func (a artifact) remove(logger *slog.Logger) {
 	}
 }
 
-func (s *relay) deployStaged(ctx context.Context, jar artifact, runID string, logger *slog.Logger) error {
-	// Once accepted, deployment must finish even if the caller disconnects.
+func (s *relay) publish(w http.ResponseWriter, ctx context.Context, staged artifact, runID, commit string, operator administrator) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deployTimeout)
 	defer cancel()
-	stageID := runID + "-" + rand.Text()
-	logger.Info("accepted PhotoLib JAR", "bytes", jar.size, "sha256", jar.sha256, "stage_id", stageID)
-	if err := s.deploy(ctx, jar, stageID, logger); err != nil {
-		logger.Error("production deployment failed", "error", err)
-		return err
+	id := strings.ToLower(rand.Text())
+	kind, source := "deploy", runID
+	if runID == "" {
+		kind, source = "oss", "oss"
 	}
-	logger.Info("PhotoLib deployment succeeded")
-	return nil
+	name := fmt.Sprintf("photolib-backend-%s-%s-%s.jar", source, id, staged.sha256)
+	record := deployment{
+		ID: id, Kind: kind, Status: "running", Run: runID, Commit: strings.ToLower(commit),
+		Name: name, OriginalName: staged.name, Operator: operator,
+		SHA256: staged.sha256, Size: staged.size, Started: time.Now().UTC(),
+	}
+	if s.archive != nil {
+		record.Object = archivePrefix + name
+	}
+	logger := s.logger.With("deployment_id", id, "run_id", runID, "user_id", operator.ID)
+	if _, err := staged.file.Seek(0, io.SeekStart); err != nil {
+		logger.Error("rewind staged JAR", "error", err)
+		http.Error(w, "cannot stage JAR on relay", http.StatusInternalServerError)
+		return false
+	}
+	if err := s.history.save(record); err != nil {
+		logger.Error("create deployment record", "error", err)
+		http.Error(w, "cannot save deployment record", http.StatusInternalServerError)
+		return false
+	}
+	if s.archive == nil {
+		staged.name = name
+		err := s.deploy(ctx, staged, record.ID, "", logger)
+		return s.finishDeployment(w, record, err, logger)
+	}
+	if err := s.archive(ctx, record.Object, staged.sha256, staged.file); err != nil {
+		logger.Error("archive JAR in OSS", "error", err)
+		if err := s.history.finish(record, "failed", "OSS 归档未获确认"); err != nil {
+			logger.Error("save archive failure", "error", err)
+		}
+		http.Error(w, "cannot archive JAR in OSS", http.StatusBadGateway)
+		return false
+	}
+	record.Archived = true
+	if err := s.history.save(record); err != nil {
+		logger.Error("record OSS archive", "error", err)
+		http.Error(w, "cannot save archive status", http.StatusInternalServerError)
+		return false
+	}
+	return s.apply(w, ctx, record)
+}
+
+func (s *relay) activate(ctx context.Context, jar artifact, stageID string, logger *slog.Logger) error {
+	if s.downloadURL == nil {
+		return errors.New("OSS archive credentials are not configured")
+	}
+	downloadURL, err := s.downloadURL(ctx, jar.key)
+	if err != nil {
+		return errors.New("cannot sign OSS download")
+	}
+	return s.deploy(ctx, jar, stageID, downloadURL, logger)
 }
 
 func validateJAR(file io.ReaderAt, size int64) error {

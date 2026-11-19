@@ -1,0 +1,18 @@
+[Unit]
+Description=PhotoLib deployment relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=deplyt
+Group=deplyt
+WorkingDirectory=/opt/deplyt
+ExecStart=/opt/deplyt/deplyt
+PrivateTmp=true
+NoNewPrivileges=true
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60min
+
+[Install]
+WantedBy=multi-user.target

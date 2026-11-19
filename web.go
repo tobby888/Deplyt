@@ -13,14 +13,17 @@ var webFiles embed.FS
 var pageTemplate = template.Must(template.ParseFS(webFiles, "web/index.html"))
 
 type page struct {
-	Title       string
-	Message     string
-	Login       bool
-	PairingURL  string
-	PairingCode string
-	User        *photoLibUser
-	Admin       bool
-	Accounts    []accessAccount
+	Title           string
+	Message         string
+	Login           bool
+	PairingURL      string
+	PairingCode     string
+	User            *photoLibUser
+	Admin           bool
+	Accounts        []accessAccount
+	Deployment      bool
+	WorkflowEnabled bool
+	WorkflowURL     string
 }
 
 func registerWebAssets(mux *http.ServeMux, brand *branding) {

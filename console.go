@@ -35,12 +35,13 @@ type consoleSession struct {
 }
 
 type console struct {
-	photo   photoLibClient
-	access  *accessRegistry
-	logger  *slog.Logger
-	mu      sync.Mutex
-	pairing map[string]*pairing
-	session map[string]*consoleSession
+	photo    photoLibClient
+	access   *accessRegistry
+	logger   *slog.Logger
+	workflow *workflowDispatch
+	mu       sync.Mutex
+	pairing  map[string]*pairing
+	session  map[string]*consoleSession
 }
 
 func newConsole(photo photoLibClient, access *accessRegistry, logger *slog.Logger) *console {
@@ -58,6 +59,7 @@ func (c *console) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /login/finish", c.finishLogin)
 	mux.HandleFunc("POST /logout", c.logout)
 	mux.HandleFunc("POST /access/{id}/{action}", c.updateAccess)
+	mux.HandleFunc("POST /deploy/workflow", c.deployWorkflow)
 }
 
 func (c *console) home(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +77,8 @@ func (c *console) home(w http.ResponseWriter, r *http.Request) {
 	if data.Admin {
 		data.Accounts = c.access.list()
 	}
+	data.Deployment = true
+	data.WorkflowEnabled = c.workflow != nil
 	renderPage(w, http.StatusOK, data)
 }
 

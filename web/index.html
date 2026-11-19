@@ -25,6 +25,19 @@
     <section class="panel" aria-labelledby="page-title">
       <h1 id="page-title">{{.Title}}</h1>
       {{if .Message}}<p role="status">{{.Message}}</p>{{end}}
+      {{if .Deployment}}
+      <p>手动运行 PhotoLib 的 <code>master</code> 工作流。构建和测试通过后，工作流会发布到生产环境。</p>
+      {{if .WorkflowEnabled}}
+      <form method="post" action="/deploy/workflow">
+        <button type="submit">触发部署工作流</button>
+      </form>
+      {{else}}
+      <p>GitHub Actions 待配置。</p>
+      {{end}}
+      {{end}}
+      {{if .WorkflowURL}}
+      <a class="button" href="{{.WorkflowURL}}" target="_blank" rel="noopener noreferrer">查看 GitHub Actions</a>
+      {{end}}
       {{if .Login}}
       <p>使用你的 PhotoLib 账号登录。</p>
       <form method="post" action="/login/start">

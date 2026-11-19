@@ -61,6 +61,19 @@ func TestPhotoLibLoginAndDynamicAccess(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	c := newConsole(photoLibClient{photoLib.URL, photoLib.Client()}, access, slog.New(slog.DiscardHandler))
+	var dispatchCount atomic.Int64
+	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input["ref"] != "master" ||
+			r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer test-github-token" {
+			http.Error(w, "invalid workflow dispatch", http.StatusBadRequest)
+			return
+		}
+		dispatchCount.Add(1)
+		_, _ = io.WriteString(w, `{"workflow_run_id":1234}`)
+	}))
+	defer github.Close()
+	c.workflow = &workflowDispatch{endpoint: github.URL, token: "test-github-token", client: github.Client()}
 	c.register(mux)
 	server := httptest.NewTLSServer(http.NewCrossOriginProtection().Handler(mux))
 	defer server.Close()
@@ -71,6 +84,7 @@ func TestPhotoLibLoginAndDynamicAccess(t *testing.T) {
 		return requestConsole(t, browser, method, server.URL+path, origin, want, contains)
 	}
 	browseConsole(t, member, http.MethodGet, "/", "", http.StatusSeeOther, "")
+	browseConsole(t, member, http.MethodPost, "/deploy/workflow", "", http.StatusSeeOther, "")
 	for _, browser := range []*http.Client{admin, member} {
 		browseConsole(t, browser, http.MethodPost, "/login/start", "", http.StatusSeeOther, "")
 		body := browseConsole(t, browser, http.MethodGet, "/login", "", http.StatusOK, "PAIR-CODE")
@@ -81,21 +95,29 @@ func TestPhotoLibLoginAndDynamicAccess(t *testing.T) {
 		browseConsole(t, browser, http.MethodPost, "/login/finish", "", http.StatusSeeOther, "")
 	}
 	browseConsole(t, member, http.MethodGet, "/", "", http.StatusForbidden, "等待授权")
+	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusForbidden, "")
 	browseConsole(t, admin, http.MethodGet, "/", "", http.StatusOK, "&lt;Photo Member&gt;")
 	browseConsole(t, member, http.MethodPost, "/access/27/grant", "", http.StatusForbidden, "")
 	browseConsole(t, admin, http.MethodPost, "/access/999/grant", "", http.StatusNotFound, "")
 	browseConsole(t, admin, http.MethodPost, "/access/27/grant", "https://other.example", http.StatusForbidden, "")
 	browseConsole(t, admin, http.MethodPost, "/access/27/grant", server.URL, http.StatusSeeOther, "")
-	browseConsole(t, member, http.MethodGet, "/", "", http.StatusOK, "PhotoLib 部署")
+	browseConsole(t, member, http.MethodGet, "/", "", http.StatusOK, "触发部署工作流")
+	browseConsole(t, member, http.MethodPost, "/deploy/workflow", "https://other.example", http.StatusForbidden, "")
+	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusAccepted, photoLibGitHub+"/actions/runs/1234")
+	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusConflict, "")
 
 	reloaded, err := openAccessRegistry(dir, photoLib.URL, 11)
 	if err != nil || !reloaded.allowed(27) {
 		t.Fatalf("grant did not survive registry reload: %v", err)
 	}
 	browseConsole(t, admin, http.MethodPost, "/access/27/revoke", server.URL, http.StatusSeeOther, "")
+	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusForbidden, "")
 	browseConsole(t, member, http.MethodGet, "/", "", http.StatusForbidden, "等待授权")
 	browseConsole(t, member, http.MethodPost, "/logout", server.URL, http.StatusSeeOther, "")
 	browseConsole(t, member, http.MethodGet, "/", "", http.StatusSeeOther, "")
+	if dispatchCount.Load() != 1 {
+		t.Fatalf("expected a single GitHub dispatch, got %d", dispatchCount.Load())
+	}
 }
 
 func consoleBrowser(t *testing.T, server *httptest.Server) *http.Client {

@@ -21,6 +21,7 @@ type config struct {
 	photoLibOrigin string
 	adminID        int64
 	stateDir       string
+	githubToken    string
 }
 
 func loadConfig(path string) (config, error) {
@@ -79,12 +80,17 @@ func loadConfig(path string) (config, error) {
 	if stateDir == "" {
 		stateDir = "state"
 	}
+	githubToken := values["GITHUB_ACTIONS_TOKEN"]
+	if strings.ContainsAny(githubToken, " \t\r\n") {
+		return config{}, errors.New("GITHUB_ACTIONS_TOKEN must not contain whitespace")
+	}
 	return config{
 		listenAddr:     addr,
 		token:          token,
 		photoLibOrigin: origin,
 		adminID:        adminID,
 		stateDir:       stateDir,
+		githubToken:    githubToken,
 		production: productionServer{
 			address:  net.JoinHostPort(values["PRODUCTION_SSH_HOST"], port),
 			user:     user,

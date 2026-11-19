@@ -48,7 +48,11 @@ func run(logger *slog.Logger) error {
 			return err
 		}
 		photoLib := photoLibClient{origin: cfg.photoLibOrigin, http: outboundClient(8 * time.Second)}
-		newConsole(photoLib, access, logger).register(mux)
+		console := newConsole(photoLib, access, logger)
+		if cfg.githubToken != "" {
+			console.workflow = &workflowDispatch{endpoint: photoLibAPI, token: cfg.githubToken, client: outboundClient(12 * time.Second)}
+		}
+		console.register(mux)
 	} else {
 		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
 			renderPage(w, http.StatusServiceUnavailable, page{

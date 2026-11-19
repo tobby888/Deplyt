@@ -28,6 +28,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 | `PHOTOLIB_BASE_URL` | PhotoLib 的 HTTPS 站点地址。Deplyt 跟随 PhotoLib 当前生效的品牌图标，包括定时图标。 |
 | `DEPLOY_ADMIN_PHOTOLIB_ID` | Deplyt 管理员的 PhotoLib 用户数字 ID。留空仅开放中转接口，控制台待配置。 |
 | `DEPLOY_STATE_DIR` | 控制台权限数据目录。systemd 下默认 `/var/lib/deplyt`，直接运行默认 `./state`。目录须由服务账号可写。 |
+| `GITHUB_ACTIONS_TOKEN` | 仅授权 PhotoLib 仓库、带 `Actions: write` 权限的 GitHub fine-grained token，用于触发工作流。 |
 | `PRODUCTION_SSH_HOST` | 生产机 IP。填中转机可达的地址，可以使用内网 IP。 |
 | `PRODUCTION_SSH_PORT` | 生产机 SSH 端口，默认 `22`。 |
 | `PRODUCTION_SSH_USER` | 现有生产部署用户，默认 `root`。该用户需要能写入 `/opt/Photolib`、执行维护命令、切换 JAR 的属主权限及管理 `photolib` 服务。 |
@@ -41,6 +42,8 @@ curl -fsS http://127.0.0.1:8080/healthz
 打开 Deplyt 的 HTTPS 地址，点“使用 PhotoLib 登录”，在 PhotoLib 的批准页输入 Deplyt 显示的配对码，再回到 Deplyt 检查批准结果。账号首次验证后会进入 Deplyt 的访问名单。配置的管理员登录后可在“PhotoLib 账号访问权限”内授予或撤销权限，成员刷新页面即可看到结果。
 
 Deplyt 以 PhotoLib 用户 ID 识别账号，访问名单保存在状态目录的 `access.json` 中。登录会话保存在进程内，重启后须重新登录。更新了 `deplyt.service` 的现有实例需要重新安装 unit、执行 `systemctl daemon-reload` 并重启服务。
+
+配置 `GITHUB_ACTIONS_TOKEN` 后，已获准的账号可点“触发部署工作流”，运行 PhotoLib `master` 上的 `build.yml`。控制台会提供 GitHub Actions 链接。GitHub 接受触发后，仍需要等待工作流完成构建、测试和部署。
 
 将控制台和静态资源转发到中转服务，并保留浏览器访问的 Host。以下 Nginx 片段放在同一 HTTPS `server` 块内。
 

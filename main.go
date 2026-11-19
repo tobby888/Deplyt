@@ -31,6 +31,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	auth, err := newConsoleAuth(cfg.values)
+	if err != nil {
+		return err
+	}
 	relay := &relay{
 		token:       cfg.token,
 		deploy:      cfg.production.deploy,
@@ -44,6 +48,14 @@ func run(logger *slog.Logger) error {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /v1/deploy/photolib", relay.handleDeploy)
+	console := http.NewServeMux()
+	console.HandleFunc("GET /auth/start", auth.start)
+	console.HandleFunc("GET /auth/callback", auth.callback)
+	console.HandleFunc("POST /auth/logout", auth.requireAdmin(auth.logout))
+	console.HandleFunc("GET /api/session", auth.requireAdmin(func(w http.ResponseWriter, _ *http.Request, admin administrator) {
+		writeJSON(w, admin)
+	}))
+	mux.Handle("/", consoleHeaders(console))
 	server := &http.Server{
 		Addr:              cfg.listenAddr,
 		Handler:           mux,

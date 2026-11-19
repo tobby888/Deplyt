@@ -17,6 +17,7 @@ type config struct {
 	token      string
 	production productionServer
 	archive    jarArchive
+	values     map[string]string
 }
 
 func loadConfig(path string) (config, error) {
@@ -59,6 +60,7 @@ func loadConfig(path string) (config, error) {
 	}
 	return config{
 		archive:    archive,
+		values:     values,
 		listenAddr: addr,
 		token:      token,
 		production: productionServer{

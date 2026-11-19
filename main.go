@@ -54,6 +54,7 @@ func run(logger *slog.Logger) error {
 	})
 	mux.HandleFunc("POST /v1/deploy/photolib", relay.handleDeploy)
 	console := http.NewServeMux()
+	github := newGitHub(cfg.values["GITHUB_TOKEN"])
 	console.HandleFunc("GET /auth/start", auth.start)
 	console.HandleFunc("GET /auth/callback", auth.callback)
 	console.HandleFunc("POST /auth/logout", auth.requireAdmin(auth.logout))
@@ -62,6 +63,8 @@ func run(logger *slog.Logger) error {
 	}))
 	console.HandleFunc("GET /api/deployments", auth.requireAdmin(relay.handleHistory))
 	console.HandleFunc("POST /api/deployments/{id}/rollback", auth.requireAdmin(relay.handleRollback))
+	console.HandleFunc("GET /api/github/{section}", auth.requireAdmin(github.list))
+	console.HandleFunc("GET /api/github/{section}/{id}", auth.requireAdmin(github.detail))
 	mux.Handle("/", consoleHeaders(console))
 	server := &http.Server{
 		Addr:              cfg.listenAddr,

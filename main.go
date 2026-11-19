@@ -31,17 +31,44 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	auth, err := newConsoleAuth(cfg.values)
+	if err != nil {
+		return err
+	}
+	store, err := openHistory(cfg.values)
+	if err != nil {
+		return err
+	}
 	relay := &relay{
-		token:   cfg.token,
-		deploy:  cfg.production.deploy,
-		logger:  logger,
-		maxSize: maxJARSize,
+		history:     store,
+		token:       cfg.token,
+		deploy:      cfg.production.deploy,
+		archive:     cfg.archive.upload,
+		downloadURL: cfg.archive.downloadURL,
+		logger:      logger,
+		maxSize:     maxJARSize,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /v1/deploy/photolib", relay.handleDeploy)
+	console := http.NewServeMux()
+	github := newGitHub(cfg.values["GITHUB_TOKEN"])
+	console.HandleFunc("GET /auth/start", auth.start)
+	console.HandleFunc("GET /auth/callback", auth.callback)
+	console.HandleFunc("POST /auth/logout", auth.requireAdmin(auth.logout))
+	console.HandleFunc("GET /api/session", auth.requireAdmin(func(w http.ResponseWriter, _ *http.Request, admin administrator) {
+		writeJSON(w, admin)
+	}))
+	console.HandleFunc("GET /api/deployments", auth.requireAdmin(relay.handleHistory))
+	console.HandleFunc("POST /api/deployments/{id}/rollback", auth.requireAdmin(relay.handleRollback))
+	console.HandleFunc("GET /api/github/{section}", auth.requireAdmin(github.list))
+	console.HandleFunc("GET /api/github/{section}/{id}", auth.requireAdmin(github.detail))
+	if err := registerUI(console); err != nil {
+		return err
+	}
+	mux.Handle("/", consoleHeaders(console))
 	server := &http.Server{
 		Addr:              cfg.listenAddr,
 		Handler:           mux,

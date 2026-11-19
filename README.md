@@ -54,9 +54,32 @@ location / {
 }
 ```
 
+## 从 OSS 部署已构建的制品
+
+已有通过测试的 PhotoLib JAR 时，可以配置 OSS 制品入口。管理员或已授权成员点“部署 OSS 制品”后，Deplyt 会下载配置的对象，验证 SHA-256 和必需的 JAR 条目，再通过同一条 SSH 部署链路发布到生产环境。OSS 与 Actions 的上传请求共用部署锁。
+
+| 配置 | 用途 |
+| --- | --- |
+| `OSS_ARTIFACT_URL` | 对象的 HTTPS 下载 URL。直连私有 OSS 时填完整的 `GetObject` 预签名 URL，保留签名查询参数，并用单引号包住。 |
+| `OSS_ARTIFACT_NAME` | 可选。默认取 URL 路径中的文件名。如果下载端点的路径不含文件名，则填 `photolib-backend-*.jar` 格式的真实文件名。 |
+| `OSS_ARTIFACT_SHA256` | 从可信构建产物计算的 SHA-256。换制品时与 URL 一并更新。 |
+| `OSS_ACCESS_TOKEN` | 下载端点接受 Bearer 认证时填写，Deplyt 通过 `Authorization: Bearer` 发送。直连 OSS 使用预签名 URL 时留空。 |
+
+Deplyt 无需配置阿里云 AccessKey。标准 OSS 的 STS SecurityToken 需要与临时 AccessKey 配合签名，可由凭证持有方生成预签名 URL 后交给 Deplyt。URL 或 Bearer Token 到期后，在 `.env` 中替换并重启服务。留空以上配置可关闭 OSS 按钮。
+
+OSS 按钮会等待部署完成。使用 Nginx 时，在同一 HTTPS `server` 内配置以下超时。
+
+```nginx
+location = /deploy/oss {
+    proxy_set_header Host $http_host;
+    proxy_read_timeout 60m;
+    proxy_pass http://127.0.0.1:8080;
+}
+```
+
 ## 连接 PhotoLib 的 GitHub Actions
 
-在 PhotoLib 仓库配置以下 Actions 变量和 Secret，再将更新的工作流合并到 `master`。
+在 PhotoLib 仓库配置以下 Actions 变量和 Secret，确保 `master` 上的 `build.yml` 包含中转部署任务。
 
 | 类型 | 名称 | 值 |
 | --- | --- | --- |

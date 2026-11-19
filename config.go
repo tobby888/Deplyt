@@ -22,6 +22,7 @@ type config struct {
 	adminID        int64
 	stateDir       string
 	githubToken    string
+	ossArtifact    *ossArtifact
 }
 
 func loadConfig(path string) (config, error) {
@@ -84,6 +85,10 @@ func loadConfig(path string) (config, error) {
 	if strings.ContainsAny(githubToken, " \t\r\n") {
 		return config{}, errors.New("GITHUB_ACTIONS_TOKEN must not contain whitespace")
 	}
+	artifact, err := loadOSSArtifact(values)
+	if err != nil {
+		return config{}, err
+	}
 	return config{
 		listenAddr:     addr,
 		token:          token,
@@ -91,6 +96,7 @@ func loadConfig(path string) (config, error) {
 		adminID:        adminID,
 		stateDir:       stateDir,
 		githubToken:    githubToken,
+		ossArtifact:    artifact,
 		production: productionServer{
 			address:  net.JoinHostPort(values["PRODUCTION_SSH_HOST"], port),
 			user:     user,

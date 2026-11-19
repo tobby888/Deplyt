@@ -24,11 +24,14 @@ type page struct {
 	Deployment      bool
 	WorkflowEnabled bool
 	WorkflowURL     string
+	OSSArtifact     string
+	RunID           string
 }
 
 func registerWebAssets(mux *http.ServeMux, brand *branding) {
 	mux.HandleFunc("GET /brand-icon", brand.serve)
 	mux.HandleFunc("GET /brand.js", serveWebAsset("brand.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /deploy.js", serveWebAsset("deploy.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /style.css", serveWebAsset("style.css", "text/css; charset=utf-8"))
 }
 

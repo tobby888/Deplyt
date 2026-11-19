@@ -7,6 +7,7 @@
   <link rel="icon" href="/brand-icon">
   <link rel="stylesheet" href="/style.css">
   <script src="/brand.js" defer></script>
+  {{if .Deployment}}<script src="/deploy.js" defer></script>{{end}}
 </head>
 <body>
   <header class="topbar">
@@ -28,7 +29,7 @@
       {{if .Deployment}}
       <p>手动运行 PhotoLib 的 <code>master</code> 工作流。构建和测试通过后，工作流会发布到生产环境。</p>
       {{if .WorkflowEnabled}}
-      <form method="post" action="/deploy/workflow">
+      <form method="post" action="/deploy/workflow" data-deploy>
         <button type="submit">触发部署工作流</button>
       </form>
       {{else}}
@@ -38,6 +39,7 @@
       {{if .WorkflowURL}}
       <a class="button" href="{{.WorkflowURL}}" target="_blank" rel="noopener noreferrer">查看 GitHub Actions</a>
       {{end}}
+      {{if .RunID}}<p>部署编号 <code>{{.RunID}}</code></p>{{end}}
       {{if .Login}}
       <p>使用你的 PhotoLib 账号登录。</p>
       <form method="post" action="/login/start">
@@ -55,6 +57,16 @@
       </div>
       {{end}}
     </section>
+    {{if .OSSArtifact}}
+    <section class="panel" aria-labelledby="oss-title">
+      <h2 id="oss-title">从 OSS 部署</h2>
+      <p>校验以下 JAR 后发布到生产环境。页面会在生产服务完成状态检查后显示结果。</p>
+      <p><code>{{.OSSArtifact}}</code></p>
+      <form method="post" action="/deploy/oss" data-deploy>
+        <button type="submit">部署 OSS 制品</button>
+      </form>
+    </section>
+    {{end}}
     {{if .Admin}}
     <section class="panel" id="access" aria-labelledby="access-title">
       <h2 id="access-title">PhotoLib 账号访问权限</h2>

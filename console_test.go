@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -74,6 +77,31 @@ func TestPhotoLibLoginAndDynamicAccess(t *testing.T) {
 	}))
 	defer github.Close()
 	c.workflow = &workflowDispatch{endpoint: github.URL, token: "test-github-token", client: github.Client()}
+	jarData := testJAR(t)
+	var ossDeployCount atomic.Int64
+	oss := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer test-oss-token" {
+			http.Error(w, "invalid OSS access token", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write(jarData)
+	}))
+	defer oss.Close()
+	c.oss = &ossDeployment{
+		artifact: &ossArtifact{url: oss.URL, name: testJARName, token: "test-oss-token", checksum: make([]byte, sha256.Size)},
+		client:   oss.Client(),
+		relay: &relay{
+			logger: c.logger, maxSize: maxJARSize,
+			deploy: func(_ context.Context, jar artifact, stageID string, _ *slog.Logger) error {
+				got := make([]byte, jar.size)
+				if _, err := jar.file.ReadAt(got, 0); err != nil || !bytes.Equal(jarData, got) || !strings.HasPrefix(stageID, "oss-") {
+					return fmt.Errorf("invalid staged OSS artifact: %v", err)
+				}
+				ossDeployCount.Add(1)
+				return nil
+			},
+		},
+	}
 	c.register(mux)
 	server := httptest.NewTLSServer(http.NewCrossOriginProtection().Handler(mux))
 	defer server.Close()
@@ -96,6 +124,7 @@ func TestPhotoLibLoginAndDynamicAccess(t *testing.T) {
 	}
 	browseConsole(t, member, http.MethodGet, "/", "", http.StatusForbidden, "等待授权")
 	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusForbidden, "")
+	browseConsole(t, member, http.MethodPost, "/deploy/oss", server.URL, http.StatusForbidden, "")
 	browseConsole(t, admin, http.MethodGet, "/", "", http.StatusOK, "&lt;Photo Member&gt;")
 	browseConsole(t, member, http.MethodPost, "/access/27/grant", "", http.StatusForbidden, "")
 	browseConsole(t, admin, http.MethodPost, "/access/999/grant", "", http.StatusNotFound, "")
@@ -105,6 +134,13 @@ func TestPhotoLibLoginAndDynamicAccess(t *testing.T) {
 	browseConsole(t, member, http.MethodPost, "/deploy/workflow", "https://other.example", http.StatusForbidden, "")
 	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusAccepted, photoLibGitHub+"/actions/runs/1234")
 	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusConflict, "")
+	browseConsole(t, member, http.MethodPost, "/deploy/oss", server.URL, http.StatusBadGateway, "OSS 部署失败")
+	digest := sha256.Sum256(jarData)
+	c.oss.relay.mu.Lock()
+	c.oss.artifact.checksum = digest[:]
+	browseConsole(t, member, http.MethodPost, "/deploy/oss", server.URL, http.StatusConflict, "")
+	c.oss.relay.mu.Unlock()
+	browseConsole(t, member, http.MethodPost, "/deploy/oss", server.URL, http.StatusOK, "PhotoLib 已部署")
 
 	reloaded, err := openAccessRegistry(dir, photoLib.URL, 11)
 	if err != nil || !reloaded.allowed(27) {
@@ -112,11 +148,15 @@ func TestPhotoLibLoginAndDynamicAccess(t *testing.T) {
 	}
 	browseConsole(t, admin, http.MethodPost, "/access/27/revoke", server.URL, http.StatusSeeOther, "")
 	browseConsole(t, member, http.MethodPost, "/deploy/workflow", server.URL, http.StatusForbidden, "")
+	browseConsole(t, member, http.MethodPost, "/deploy/oss", server.URL, http.StatusForbidden, "")
 	browseConsole(t, member, http.MethodGet, "/", "", http.StatusForbidden, "等待授权")
 	browseConsole(t, member, http.MethodPost, "/logout", server.URL, http.StatusSeeOther, "")
 	browseConsole(t, member, http.MethodGet, "/", "", http.StatusSeeOther, "")
 	if dispatchCount.Load() != 1 {
 		t.Fatalf("expected a single GitHub dispatch, got %d", dispatchCount.Load())
+	}
+	if ossDeployCount.Load() != 1 {
+		t.Fatalf("expected a single verified OSS deployment, got %d", ossDeployCount.Load())
 	}
 }
 

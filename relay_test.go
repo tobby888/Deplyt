@@ -64,7 +64,8 @@ func TestRelayRejectsInvalidUploads(t *testing.T) {
 	}
 }
 
-func TestRelayDeploysThroughSSH(t *testing.T) {
+func testJAR(t *testing.T) []byte {
+	t.Helper()
 	var data bytes.Buffer
 	archive := zip.NewWriter(&data)
 	for _, name := range []string{
@@ -84,7 +85,11 @@ func TestRelayDeploysThroughSSH(t *testing.T) {
 	if err := archive.Close(); err != nil {
 		t.Fatal(err)
 	}
+	return data.Bytes()
+}
 
+func TestRelayDeploysThroughSSH(t *testing.T) {
+	data := testJAR(t)
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -118,11 +123,11 @@ func TestRelayDeploysThroughSSH(t *testing.T) {
 	}}
 	server.AddHostKey(key)
 	result := make(chan error, 1)
-	go func() { result <- verifySSHDeployment(listener, server, data.Bytes()) }()
+	go func() { result <- verifySSHDeployment(listener, server, data) }()
 
 	handler := &relay{token: cfg.token, maxSize: maxJARSize, logger: slog.New(slog.DiscardHandler), deploy: cfg.production.deploy}
 	response := httptest.NewRecorder()
-	handler.handleDeploy(response, deploymentRequest(data.Bytes()))
+	handler.handleDeploy(response, deploymentRequest(data))
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}

@@ -34,6 +34,8 @@ button, .button {
   cursor: pointer;
 }
 button:hover, .button:hover { background: #19466b; }
+button:disabled { opacity: .68; cursor: wait; }
+code { overflow-wrap: anywhere; }
 .secondary { background: #fff; color: #245984; border-color: #a4bbcf; }
 .secondary:hover { background: #eaf1f7; }
 .account-menu, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }

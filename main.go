@@ -52,6 +52,9 @@ func run(logger *slog.Logger) error {
 		if cfg.githubToken != "" {
 			console.workflow = &workflowDispatch{endpoint: photoLibAPI, token: cfg.githubToken, client: outboundClient(12 * time.Second)}
 		}
+		if cfg.ossArtifact != nil {
+			console.oss = &ossDeployment{artifact: cfg.ossArtifact, client: outboundClient(uploadTimeout), relay: relay}
+		}
 		console.register(mux)
 	} else {
 		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {

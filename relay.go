@@ -27,6 +27,7 @@ type artifact struct {
 	name   string
 	sha256 string
 	file   *os.File
+	size   int64
 }
 
 type relay struct {
@@ -63,64 +64,90 @@ func (s *relay) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	logger := s.logger.With("run_id", runID, "artifact", name)
 
+	jar, stageErr := stageArtifact(http.MaxBytesReader(w, r.Body, s.maxSize), name, expectedSum, s.maxSize, logger)
+	if stageErr != nil {
+		http.Error(w, stageErr.Error(), stageErr.status)
+		return
+	}
+	defer jar.remove(logger)
+	if r.Context().Err() != nil {
+		return
+	}
+	if err := s.deployStaged(r.Context(), jar, runID, logger); err != nil {
+		http.Error(w, "production deployment failed; check relay logs for this run ID", http.StatusBadGateway)
+		return
+	}
+	_, _ = io.WriteString(w, "PhotoLib deployed\n")
+}
+
+type stagingError struct {
+	message string
+	status  int
+}
+
+func (e *stagingError) Error() string { return e.message }
+
+func stageArtifact(source io.Reader, name string, expectedSum []byte, maxSize int64, logger *slog.Logger) (artifact, *stagingError) {
 	file, err := os.CreateTemp("", "deplyt-*.jar")
 	if err != nil {
 		logger.Error("create temporary file", "error", err)
-		http.Error(w, "cannot stage JAR on relay", http.StatusInternalServerError)
-		return
+		return artifact{}, &stagingError{"cannot stage JAR on relay", http.StatusInternalServerError}
 	}
+	jar := artifact{name: name, file: file}
+	accepted := false
 	defer func() {
-		_ = file.Close()
-		if err := os.Remove(file.Name()); err != nil {
-			logger.Warn("remove temporary JAR", "error", err)
+		if !accepted {
+			jar.remove(logger)
 		}
 	}()
 
 	hash := sha256.New()
-	// Hash the JAR as it streams to disk.
-	size, err := io.Copy(io.MultiWriter(file, hash), http.MaxBytesReader(w, r.Body, s.maxSize))
+	size, err := io.Copy(io.MultiWriter(file, hash), io.LimitReader(source, maxSize+1))
+	var tooLarge *http.MaxBytesError
+	if size > maxSize || errors.As(err, &tooLarge) {
+		return artifact{}, &stagingError{"JAR exceeds upload limit", http.StatusRequestEntityTooLarge}
+	}
 	if err != nil {
-		var tooLarge *http.MaxBytesError
 		var fileError *os.PathError
-		switch {
-		case errors.As(err, &tooLarge):
-			http.Error(w, "JAR exceeds upload limit", http.StatusRequestEntityTooLarge)
-		case errors.As(err, &fileError):
+		if errors.As(err, &fileError) {
 			logger.Error("write temporary JAR", "error", err)
-			http.Error(w, "cannot stage JAR on relay", http.StatusInternalServerError)
-		default:
-			logger.Warn("read JAR upload", "error", err)
-			http.Error(w, "incomplete JAR upload", http.StatusBadRequest)
+			return artifact{}, &stagingError{"cannot stage JAR on relay", http.StatusInternalServerError}
 		}
-		return
+		return artifact{}, &stagingError{"incomplete JAR transfer", http.StatusBadRequest}
 	}
 	actualSum := hash.Sum(nil)
 	if subtle.ConstantTimeCompare(actualSum, expectedSum) != 1 {
-		http.Error(w, "JAR SHA-256 mismatch", http.StatusUnprocessableEntity)
-		return
+		return artifact{}, &stagingError{"JAR SHA-256 mismatch", http.StatusUnprocessableEntity}
 	}
 	if err := validateJAR(file, size); err != nil {
 		logger.Warn("invalid PhotoLib JAR", "error", err)
-		http.Error(w, "invalid PhotoLib JAR", http.StatusUnprocessableEntity)
-		return
+		return artifact{}, &stagingError{"invalid PhotoLib JAR", http.StatusUnprocessableEntity}
 	}
-	if r.Context().Err() != nil {
-		return
-	}
+	jar.sha256 = hex.EncodeToString(actualSum)
+	jar.size = size
+	accepted = true
+	return jar, nil
+}
 
-	// Once accepted, deployment must finish even if the runner disconnects.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), deployTimeout)
+func (a artifact) remove(logger *slog.Logger) {
+	_ = a.file.Close()
+	if err := os.Remove(a.file.Name()); err != nil {
+		logger.Warn("remove temporary JAR", "error", err)
+	}
+}
+
+func (s *relay) deployStaged(ctx context.Context, jar artifact, runID string, logger *slog.Logger) error {
+	// Once accepted, deployment must finish even if the caller disconnects.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deployTimeout)
 	defer cancel()
 	stageID := runID + "-" + rand.Text()
-	jar := artifact{name: name, sha256: hex.EncodeToString(actualSum), file: file}
-	logger.Info("accepted PhotoLib JAR", "bytes", size, "sha256", jar.sha256, "stage_id", stageID)
+	logger.Info("accepted PhotoLib JAR", "bytes", jar.size, "sha256", jar.sha256, "stage_id", stageID)
 	if err := s.deploy(ctx, jar, stageID, logger); err != nil {
 		logger.Error("production deployment failed", "error", err)
-		http.Error(w, "production deployment failed; check relay logs for this run ID", http.StatusBadGateway)
-		return
+		return err
 	}
 	logger.Info("PhotoLib deployment succeeded")
-	_, _ = io.WriteString(w, "PhotoLib deployed\n")
+	return nil
 }
 
 func validateJAR(file io.ReaderAt, size int64) error {

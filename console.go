@@ -39,6 +39,7 @@ type console struct {
 	access   *accessRegistry
 	logger   *slog.Logger
 	workflow *workflowDispatch
+	oss      *ossDeployment
 	mu       sync.Mutex
 	pairing  map[string]*pairing
 	session  map[string]*consoleSession
@@ -60,6 +61,7 @@ func (c *console) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /logout", c.logout)
 	mux.HandleFunc("POST /access/{id}/{action}", c.updateAccess)
 	mux.HandleFunc("POST /deploy/workflow", c.deployWorkflow)
+	mux.HandleFunc("POST /deploy/oss", c.deployOSS)
 }
 
 func (c *console) home(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +81,9 @@ func (c *console) home(w http.ResponseWriter, r *http.Request) {
 	}
 	data.Deployment = true
 	data.WorkflowEnabled = c.workflow != nil
+	if c.oss != nil {
+		data.OSSArtifact = c.oss.artifact.name
+	}
 	renderPage(w, http.StatusOK, data)
 }
 

@@ -25,6 +25,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 | --- | --- |
 | `DEPLOY_TOKEN` | 上传令牌。可用 `openssl rand -hex 32` 生成，和 Actions Secret 使用同一个值。 |
 | `DEPLOY_LISTEN_ADDR` | 监听地址，默认 `127.0.0.1:8080`，供同机 HTTPS 反向代理使用。 |
+| `PHOTOLIB_BASE_URL` | PhotoLib 的 HTTPS 站点地址。Deplyt 跟随 PhotoLib 当前生效的品牌图标，包括定时图标。 |
 | `PRODUCTION_SSH_HOST` | 生产机 IP。填中转机可达的地址，可以使用内网 IP。 |
 | `PRODUCTION_SSH_PORT` | 生产机 SSH 端口，默认 `22`。 |
 | `PRODUCTION_SSH_USER` | 现有生产部署用户，默认 `root`。该用户需要能写入 `/opt/Photolib`、执行维护命令、切换 JAR 的属主权限及管理 `photolib` 服务。 |

@@ -9,7 +9,7 @@ body { margin: 0; }
 .layout { width: min(100% - 2rem, 58rem); margin-inline: auto; }
 .topbar { background: #fff; border-bottom: 1px solid #dbe4ee; }
 .brand { display: flex; align-items: center; gap: .75rem; padding-block: .9rem; }
-.brand img { flex: none; }
+.brand img { flex: none; object-fit: contain; border-radius: .45rem; }
 .brand a { display: block; color: inherit; font-size: 1.15rem; font-weight: 750; text-decoration: none; }
 .brand small { display: block; color: #455a71; }
 main { padding-block: clamp(1.5rem, 5vw, 3rem); }

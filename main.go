@@ -38,7 +38,15 @@ func run(logger *slog.Logger) error {
 		maxSize: maxJARSize,
 	}
 	mux := http.NewServeMux()
-	registerWebAssets(mux)
+	registerWebAssets(mux, &branding{
+		origin: cfg.photoLibOrigin,
+		client: &http.Client{
+			Timeout: 3 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	})
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
 		renderPage(w, http.StatusOK, page{
 			Title:   "PhotoLib 部署",

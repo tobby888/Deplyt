@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -13,9 +14,10 @@ import (
 )
 
 type config struct {
-	listenAddr string
-	token      string
-	production productionServer
+	listenAddr     string
+	token          string
+	production     productionServer
+	photoLibOrigin string
 }
 
 func loadConfig(path string) (config, error) {
@@ -52,9 +54,18 @@ func loadConfig(path string) (config, error) {
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
+	origin := values["PHOTOLIB_BASE_URL"]
+	if origin != "" {
+		site, err := parseHTTPSEndpoint(origin)
+		if err != nil || (site.Path != "" && site.Path != "/") || site.RawQuery != "" || site.ForceQuery {
+			return config{}, errors.New("PHOTOLIB_BASE_URL must be an HTTPS origin")
+		}
+		origin = "https://" + strings.ToLower(site.Host)
+	}
 	return config{
-		listenAddr: addr,
-		token:      token,
+		listenAddr:     addr,
+		token:          token,
+		photoLibOrigin: origin,
 		production: productionServer{
 			address:  net.JoinHostPort(values["PRODUCTION_SSH_HOST"], port),
 			user:     user,
@@ -62,4 +73,13 @@ func loadConfig(path string) (config, error) {
 			hostKey:  hostKey,
 		},
 	}, nil
+}
+
+func parseHTTPSEndpoint(value string) (*url.URL, error) {
+	endpoint, err := url.Parse(value)
+	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" ||
+		endpoint.User != nil || endpoint.Fragment != "" {
+		return nil, errors.New("expected an HTTPS URL")
+	}
+	return endpoint, nil
 }

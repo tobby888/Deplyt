@@ -17,8 +17,9 @@ type page struct {
 	Message string
 }
 
-func registerWebAssets(mux *http.ServeMux) {
-	mux.HandleFunc("GET /favicon.svg", serveWebAsset("favicon.svg", "image/svg+xml"))
+func registerWebAssets(mux *http.ServeMux, brand *branding) {
+	mux.HandleFunc("GET /brand-icon", brand.serve)
+	mux.HandleFunc("GET /brand.js", serveWebAsset("brand.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /style.css", serveWebAsset("style.css", "text/css; charset=utf-8"))
 }
 
@@ -44,7 +45,7 @@ func renderPage(w http.ResponseWriter, status int, data page) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; script-src 'self'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	w.WriteHeader(status)
 	_, _ = output.WriteTo(w)
 }

@@ -69,7 +69,11 @@ func httpsOrigin(value string) (string, error) {
 		(u.Path != "" && u.Path != "/") || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" {
 		return "", errors.New("invalid HTTPS origin")
 	}
-	return "https://" + strings.ToLower(u.Host), nil
+	host := strings.ToLower(u.Host)
+	if u.Port() == "443" {
+		host = strings.TrimSuffix(host, ":443")
+	}
+	return "https://" + host, nil
 }
 
 func randomToken() string {

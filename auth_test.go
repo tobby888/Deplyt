@@ -29,7 +29,7 @@ func TestConsoleSSOAndOriginCheck(t *testing.T) {
 	}))
 	defer provider.Close()
 	auth, err := newConsoleAuth(map[string]string{
-		"DEPLYT_PUBLIC_URL": "https://deploy.example.test", "PHOTOLIB_PUBLIC_URL": provider.URL, "DEPLYT_SSO_SECRET": testToken,
+		"DEPLYT_PUBLIC_URL": "https://Deploy.example.test:443", "PHOTOLIB_PUBLIC_URL": provider.URL, "DEPLYT_SSO_SECRET": testToken,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ func TestConsoleSSOAndOriginCheck(t *testing.T) {
 	}
 	if request(protected, nil, auth.origin) != http.StatusUnauthorized ||
 		request(protected, session, "https://elsewhere.example.test") != http.StatusForbidden ||
-		request(protected, session, auth.origin) != http.StatusNoContent ||
+		request(protected, session, "https://deploy.example.test") != http.StatusNoContent ||
 		request(auth.requireAdmin(auth.logout), session, auth.origin) != http.StatusNoContent ||
 		request(protected, session, auth.origin) != http.StatusUnauthorized {
 		t.Fatal("unexpected admin session or CSRF behavior")

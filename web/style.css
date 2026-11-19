@@ -1,0 +1,20 @@
+:root {
+  font-family: system-ui, "Microsoft YaHei", sans-serif;
+  color: #182a3e;
+  background: #f3f6fa;
+  line-height: 1.55;
+}
+
+body { margin: 0; }
+.layout { width: min(100% - 2rem, 58rem); margin-inline: auto; }
+.topbar { background: #fff; border-bottom: 1px solid #dbe4ee; }
+.brand { display: flex; align-items: center; gap: .75rem; padding-block: .9rem; }
+.brand img { flex: none; }
+.brand a { display: block; color: inherit; font-size: 1.15rem; font-weight: 750; text-decoration: none; }
+.brand small { display: block; color: #455a71; }
+main { padding-block: clamp(1.5rem, 5vw, 3rem); }
+.panel { padding: clamp(1.15rem, 4vw, 2rem); border: 1px solid #dbe4ee; border-radius: .9rem; background: #fff; }
+h1 { font-size: clamp(1.35rem, 5vw, 1.75rem); margin: 0; }
+p { margin: .75rem 0 1rem; color: #455a71; }
+p:last-child { margin-bottom: 0; }
+a { color: #245984; }

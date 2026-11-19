@@ -38,6 +38,13 @@ func run(logger *slog.Logger) error {
 		maxSize: maxJARSize,
 	}
 	mux := http.NewServeMux()
+	registerWebAssets(mux)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
+		renderPage(w, http.StatusOK, page{
+			Title:   "PhotoLib 部署",
+			Message: "通过 Deplyt 将 PhotoLib 发布到生产环境。",
+		})
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})

@@ -37,15 +37,16 @@ type adminSession struct {
 }
 
 type consoleAuth struct {
-	origin   string
-	photoLib string
-	secret   string
-	client   *http.Client
-	mu       sync.Mutex
-	sessions map[string]adminSession
-	pairings map[string]*pairing
-	access   *accessRegistry
-	photo    photoLibClient
+	origin    string
+	photoLib  string
+	secret    string
+	client    *http.Client
+	mu        sync.Mutex
+	sessions  map[string]adminSession
+	pairings  map[string]*pairing
+	access    *accessRegistry
+	photo     photoLibClient
+	emergency *emergencyPassword
 }
 
 func newConsoleAuth(values map[string]string) (*consoleAuth, error) {
@@ -61,11 +62,16 @@ func newConsoleAuth(values map[string]string) (*consoleAuth, error) {
 	if secret != "" && (len(secret) < 32 || strings.ContainsAny(secret, " \t\r\n")) {
 		return nil, errors.New("DEPLYT_SSO_SECRET must have at least 32 characters and no whitespace")
 	}
+	emergency, err := parseEmergencyPassword(values["DEPLOY_EMERGENCY_PASSWORD_HASH"])
+	if err != nil {
+		return nil, err
+	}
 	return &consoleAuth{
 		origin: origin, photoLib: photoLib, secret: secret, sessions: make(map[string]adminSession),
-		client:   &http.Client{Timeout: 10 * time.Second, CheckRedirect: rejectRedirect},
-		pairings: make(map[string]*pairing),
-		photo:    photoLibClient{origin: photoLib, http: outboundClient(8 * time.Second)},
+		client:    &http.Client{Timeout: 10 * time.Second, CheckRedirect: rejectRedirect},
+		pairings:  make(map[string]*pairing),
+		photo:     photoLibClient{origin: photoLib, http: outboundClient(8 * time.Second)},
+		emergency: emergency,
 	}, nil
 }
 
@@ -188,7 +194,7 @@ func (a *consoleAuth) protect(level accessLevel, next func(http.ResponseWriter, 
 		}
 		user, err := a.identity(r)
 		if errors.Is(err, errPhotoLibSession) {
-			http.Error(w, "请使用 PhotoLib 账号登录", http.StatusUnauthorized)
+			http.Error(w, "请先登录 Deplyt", http.StatusUnauthorized)
 			return
 		}
 		if err != nil {

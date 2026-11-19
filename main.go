@@ -21,6 +21,13 @@ const (
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if len(os.Args) == 2 && os.Args[1] == "generate-emergency-password" {
+		if err := generateEmergencyPassword(os.Stdout); err != nil {
+			logger.Error("cannot output emergency password", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(logger); err != nil {
 		logger.Error("relay stopped", "error", err)
 		os.Exit(1)
@@ -36,8 +43,8 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if cfg.adminID == 0 && auth.secret == "" {
-		return errors.New("configure DEPLOY_ADMIN_PHOTOLIB_ID or DEPLYT_SSO_SECRET to enable console administration")
+	if cfg.adminID == 0 && auth.secret == "" && auth.emergency == nil {
+		return errors.New("configure DEPLOY_ADMIN_PHOTOLIB_ID, DEPLYT_SSO_SECRET, or DEPLOY_EMERGENCY_PASSWORD_HASH to enable console administration")
 	}
 	store, err := openHistory(cfg.values)
 	if err != nil {
@@ -73,6 +80,7 @@ func run(logger *slog.Logger) error {
 	console.HandleFunc("GET /api/login", auth.loginView)
 	console.HandleFunc("POST /auth/pairing", auth.startPairing)
 	console.HandleFunc("POST /auth/pairing/finish", auth.finishPairing)
+	console.HandleFunc("POST /auth/emergency", auth.emergencyLogin(logger))
 	console.HandleFunc("POST /auth/logout", auth.protect(authenticatedAccess, func(w http.ResponseWriter, r *http.Request, user consoleIdentity) {
 		auth.logout(w, r, user.administrator)
 	}))

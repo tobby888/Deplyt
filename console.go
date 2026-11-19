@@ -46,12 +46,13 @@ type consoleSession struct {
 
 type loginView struct {
 	SSO        bool   `json:"sso"`
+	Emergency  bool   `json:"emergency,omitempty"`
 	PairingURL string `json:"pairingURL,omitempty"`
 	Code       string `json:"code,omitempty"`
 }
 
 func (a *consoleAuth) writeLogin(w http.ResponseWriter, p *pairing) {
-	view := loginView{SSO: a.secret != ""}
+	view := loginView{SSO: a.secret != "", Emergency: a.emergency != nil}
 	if p != nil && p.data.DeviceCode != "" {
 		view.PairingURL = a.photo.authorizationURL(p.data.RequestID)
 		view.Code = p.data.UserCode
@@ -190,9 +191,14 @@ func (a *consoleAuth) removePairing(id string) {
 
 func (a *consoleAuth) setSession(w http.ResponseWriter, r *http.Request, session adminSession, ttl time.Duration) bool {
 	a.dropSession(r)
+	return a.saveSession(w, r, session, ttl)
+}
+
+func (a *consoleAuth) saveSession(w http.ResponseWriter, r *http.Request, session adminSession, ttl time.Duration) bool {
 	now, token := time.Now(), randomToken()
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	delete(a.sessions, cookieValue(r, sessionCookie))
 	for id, active := range a.sessions {
 		if !now.Before(active.expires) {
 			delete(a.sessions, id)

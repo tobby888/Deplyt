@@ -43,8 +43,9 @@ curl -fsS http://127.0.0.1:8080/healthz
 | `OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` | Deplyt 专用 RAM 凭据，仅需访问下述 JAR 前缀。 |
 | `OSS_ECS_RAM_ROLE` | 在阿里云 ECS 上部署时，可填实例绑定的 RAM 角色名。SDK 自动取得并更新临时凭据。此模式无需填写 AccessKey。 |
 | `DEPLYT_PUBLIC_URL`、`PHOTOLIB_PUBLIC_URL` | Deplyt 和 PhotoLib 的 HTTPS 源地址，例如 `https://deploy.example.com`，带非默认端口时需填写端口。 |
-| `DEPLOY_ADMIN_PHOTOLIB_ID` | Deplyt 管理员的 PhotoLib 用户数字 ID。配置后仅该账号管理 Deplyt。 |
+| `DEPLOY_ADMIN_PHOTOLIB_ID` | 指定可通过 PhotoLib 登录取得 Deplyt 管理权限的用户数字 ID。 |
 | `DEPLYT_SSO_SECRET` | 可选的 PhotoLib 管理员单点登录密钥。通过 `openssl rand -hex 32` 生成，并在 PhotoLib 和 Deplyt 填入相同值。 |
+| `DEPLOY_EMERGENCY_PASSWORD_HASH` | 可选的应急管理员密码哈希。使用 Deplyt 的密码生成命令配置。 |
 | `GITHUB_TOKEN` | 仅在 Deplyt 后端使用，限定到 `tobby888/Photolib` 的细粒度 PAT。 |
 | `GITHUB_ACTIONS_TOKEN` | 限定到 PhotoLib 仓库、具有 `Actions: write` 权限的细粒度 PAT。启用控制台的手动工作流。 |
 | `DEPLOY_STATE_DIR` | 部署记录与访问权限目录。systemd 默认使用 `/var/lib/deplyt`，手动运行默认使用当前目录的 `data/`。升级时保留该目录。 |
@@ -79,6 +80,18 @@ curl -fsS http://127.0.0.1:8080/healthz
 为 `GITHUB_TOKEN` 授予 Contents、Pull requests、Actions、Dependabot alerts、Code scanning alerts、Secret scanning alerts 的 Read 权限。GitHub 仓库需启用对应扫描功能，控制台会在相应板块显示权限或功能错误。凭据扫描页只展示告警元数据。[GitHub PAT 权限文档](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
 
 配置 `GITHUB_ACTIONS_TOKEN` 后，已授权成员可手动触发 PhotoLib `master` 上的 `build.yml`，并在 GitHub 查看运行进度。
+
+## 应急管理员登录
+
+在中转机安装新版 Deplyt 后运行：
+
+```sh
+/opt/deplyt/deplyt generate-emergency-password
+```
+
+命令会输出随机密码和一行形如 `DEPLOY_EMERGENCY_PASSWORD_HASH='...'` 的配置。将密码保存到密码管理器，再把完整的配置行连同单引号写入中转机的 `/opt/deplyt/.env`，最后执行 `sudo systemctl restart deplyt`。应急密码只在 Deplyt 上配置。
+
+配置后，登录页显示「使用应急密码登录」。此入口可在 PhotoLib 不可用时直接登录 Deplyt，授予 30 分钟的管理员会话，可查看部署记录、部署和回滚。操作记录使用「应急管理员」标识，登录事件也会写入 Deplyt 服务日志。更换或停用时，更新或清空哈希后重启 Deplyt。
 
 ## 连接 PhotoLib 的 GitHub Actions
 

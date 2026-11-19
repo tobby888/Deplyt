@@ -77,6 +77,28 @@
     }
   }
 
+  async function signInWithEmergencyPassword(event) {
+    event.preventDefault()
+    if (busy) return
+    const form = event.currentTarget
+    const password = new FormData(form).get('password')
+    form.reset()
+    busy = true
+    error = ''
+    try {
+      await api('/auth/emergency', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      location.replace('/')
+    } catch (err) {
+      error = err.message
+    } finally {
+      busy = false
+    }
+  }
+
   function expire() {
     user = null
     error = '会话已过期，请重新登录。'
@@ -121,6 +143,18 @@
             {#if login.sso}<a class="button" href="/auth/start">管理员单点登录</a>{/if}
           {/if}
         </div>
+        {#if login.emergency}
+          <details class="emergency-login">
+            <summary>使用应急密码登录</summary>
+            <form method="post" action="/auth/emergency" onsubmit={signInWithEmergencyPassword}>
+              <label>
+                应急密码
+                <input type="password" name="password" autocomplete="current-password" required />
+              </label>
+              <button type="submit" class="button" disabled={busy}>登录</button>
+            </form>
+          </details>
+        {/if}
       {/if}
     </section>
   </main>

@@ -88,6 +88,11 @@ h1 { font-size: clamp(1.85rem, 5vw, 2.55rem); line-height: 1.2; letter-spacing: 
 .status.running { background: #eeeaff; color: #4c3a9b; }
 details { margin-top: 12px; }
 summary { width: fit-content; color: var(--accent); font-size: .86rem; }
+.emergency-login { margin-top: 20px; }
+.emergency-login form { display: grid; gap: 10px; justify-items: start; margin-top: 10px; }
+.emergency-login label { display: grid; gap: 4px; width: 100%; font-size: .9rem; }
+.emergency-login input { width: 100%; padding: 8px 10px; border: 1px solid #cbd1de; border-radius: 8px; font: inherit; }
+.emergency-login input:focus-visible { outline: 2px solid #6559d9; outline-offset: 2px; }
 .facts { display: grid; gap: 6px 20px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); color: var(--muted); margin: 12px 0 4px; }
 .facts > div { min-width: 0; }
 .facts dt { font-size: .78rem; font-weight: 650; }

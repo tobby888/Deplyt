@@ -35,7 +35,12 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	store, err := openHistory(cfg.values)
+	if err != nil {
+		return err
+	}
 	relay := &relay{
+		history:     store,
 		token:       cfg.token,
 		deploy:      cfg.production.deploy,
 		archive:     cfg.archive.upload,
@@ -55,6 +60,8 @@ func run(logger *slog.Logger) error {
 	console.HandleFunc("GET /api/session", auth.requireAdmin(func(w http.ResponseWriter, _ *http.Request, admin administrator) {
 		writeJSON(w, admin)
 	}))
+	console.HandleFunc("GET /api/deployments", auth.requireAdmin(relay.handleHistory))
+	console.HandleFunc("POST /api/deployments/{id}/rollback", auth.requireAdmin(relay.handleRollback))
 	mux.Handle("/", consoleHeaders(console))
 	server := &http.Server{
 		Addr:              cfg.listenAddr,

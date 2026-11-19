@@ -2,6 +2,12 @@ set -euo pipefail
 shopt -s nullglob
 cd "$DEPLOY_DIR"
 staged=".upload-$RUN_ID.jar"
+exec 9>.deplyt-switch.lock
+if ! flock -n 9; then
+  rm -f -- "$staged"
+  echo "PhotoLib 版本切换正在进行" >&2
+  exit 1
+fi
 previous=(photolib-backend-*.jar)
 if (( ${#previous[@]} > 1 )); then
   echo "生产目录有多个匹配的 JAR，无法确认现行版本" >&2

@@ -140,7 +140,7 @@ func TestRelayArchivesToOSSAndSwitchesThroughSSH(t *testing.T) {
 			}
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
 		})}))
-	handler := &relay{token: cfg.token, maxSize: maxJARSize, logger: slog.New(slog.DiscardHandler),
+	handler := &relay{token: cfg.token, maxSize: maxJARSize, logger: slog.New(slog.DiscardHandler), history: history(t.TempDir()),
 		archive: cfg.archive.upload, downloadURL: cfg.archive.downloadURL, deploy: cfg.production.deploy}
 	response := httptest.NewRecorder()
 	handler.handleDeploy(response, deploymentRequest(data.Bytes()))
@@ -160,7 +160,7 @@ func verifySSHDeployment(listener net.Listener, server *ssh.ServerConfig, digest
 	var runID, jarName string
 	if err := expectSSHCommand(listener, server, func(command string, body []byte) error {
 		match := regexp.MustCompile(`\.upload-([A-Za-z0-9-]+)\.jar`).FindStringSubmatch(command)
-		if len(match) != 2 || !strings.HasPrefix(match[1], "12345-") || !strings.Contains(command, digest) ||
+		if len(match) != 2 || !strings.Contains(command, digest) ||
 			!strings.Contains(command, "curl -q") || strings.Contains(command, "Signature") {
 			return fmt.Errorf("unexpected download command: %q", command)
 		}
@@ -170,7 +170,7 @@ func verifySSHDeployment(listener net.Listener, server *ssh.ServerConfig, digest
 			!strings.Contains(url, "x-oss-signature=") {
 			return fmt.Errorf("expected presigned OSS URL on SSH stdin")
 		}
-		jarName = "photolib-backend-" + strings.TrimSuffix(runID, "-1") + "-" + digest + ".jar"
+		jarName = "photolib-backend-12345-" + strings.TrimSuffix(runID, "-1") + "-" + digest + ".jar"
 		if !strings.Contains(url, "/"+archivePrefix+jarName+"?") {
 			return fmt.Errorf("download name does not match deployment name")
 		}

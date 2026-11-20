@@ -13,10 +13,16 @@
   let items = $state([])
   let page = $state(1)
   let next = $state(false)
-  let loading = $state(true)
+  let loading = $state(false)
   let error = $state('')
   let details = $state({})
-  const dependabotCursors = new Map()
+  let updatedAt = $state(null)
+  let syncStatus = $state(null)
+  let syncError = $state('')
+  let submitting = $state(false)
+  let mounted = false
+  let timer
+  let loadedRevision
   const states = {
     open: '开放', closed: '已关闭', merged: '已合并', dismissed: '已忽略', fixed: '已修复',
     resolved: '已处理', success: '成功', failure: '失败', cancelled: '已取消', skipped: '已跳过',
@@ -29,25 +35,24 @@
   }
 
   async function load(to = page) {
+    if (loading) return
+    const revision = syncStatus?.revision
     loading = true
     error = ''
-    details = {}
     try {
-      const query = new URLSearchParams({ page: to })
-      if (feed === 'dependabot' && dependabotCursors.has(to)) {
-        query.set('after', dependabotCursors.get(to))
-      }
-      const result = await api(`/api/github/${feed}?${query}`)
-      if (feed === 'dependabot') {
-        if (result.nextCursor) dependabotCursors.set(to + 1, result.nextCursor)
-        else dependabotCursors.delete(to + 1)
+      let result = await api(`/api/github/${feed}?page=${to}`)
+      if (!mounted) return
+      if (to > 1 && !result.items.length) {
+        to = 1
+        result = await api(`/api/github/${feed}?page=1`)
       }
       items = result.items
+      details = result.details
+      updatedAt = result.updatedAt
       next = result.hasNext
       page = to
+      loadedRevision = revision
     } catch (err) {
-      items = []
-      next = false
       if (err.status === 401) onExpired()
       else error = err.message
     } finally {
@@ -55,27 +60,58 @@
     }
   }
 
-  onMount(() => { void load(1) })
+  function scheduleStatus(delay) {
+    clearTimeout(timer)
+    if (mounted) timer = setTimeout(pollStatus, delay)
+  }
+
+  async function pollStatus() {
+    try {
+      const result = await api('/api/github/sync')
+      if (!mounted) return
+      syncStatus = result
+      syncError = ''
+      if (loadedRevision !== result.revision) await load()
+    } catch (err) {
+      if (err.status === 401) onExpired()
+      else syncError = err.message
+    } finally {
+      scheduleStatus(syncStatus?.running ? 2500 : 30000)
+    }
+  }
+
+  async function syncNow() {
+    submitting = true
+    syncError = ''
+    try {
+      syncStatus = await api('/api/github/sync', { method: 'POST' })
+      scheduleStatus(0)
+    } catch (err) {
+      if (err.status === 401) onExpired()
+      else syncError = err.message
+    } finally {
+      submitting = false
+    }
+  }
+
+  onMount(() => {
+    mounted = true
+    void pollStatus()
+    return () => {
+      mounted = false
+      clearTimeout(timer)
+    }
+  })
 
   function select(id) {
     if (source === id) return
     source = id
-    dependabotCursors.clear()
     items = []
+    details = {}
+    updatedAt = null
+    next = false
     page = 1
     void load(1)
-  }
-
-  async function loadDetail(event, id) {
-    if (!event.currentTarget.open || details[id]) return
-    const cache = details
-    cache[id] = { loading: true }
-    try {
-      cache[id] = { data: await api(`/api/github/${section}/${id}`) }
-    } catch (err) {
-      if (err.status === 401) onExpired()
-      else cache[id] = { error: err.message }
-    }
   }
 
   function titleFor(alert) {
@@ -104,8 +140,7 @@
 {/snippet}
 
 {#snippet detailState(entry)}
-  {#if entry?.loading}<p class="muted" role="status">加载详情…</p>
-  {:else if entry?.error}<p class="notice danger" role="alert">{entry.error}</p>{/if}
+  {#if !entry}<p class="muted">{syncStatus?.running ? '正在同步详情…' : '暂无已同步详情。'}</p>{/if}
 {/snippet}
 
 <section class="panel">
@@ -119,15 +154,31 @@
     {:else}
       <h2>{section === 'commits' ? '默认分支提交' : section === 'pulls' ? '全部 Pull Requests' : '工作流运行'}</h2>
     {/if}
-    <button class="button" disabled={loading} onclick={() => load()}>刷新</button>
+    <button class="button" disabled={!syncStatus?.enabled || syncStatus.running || submitting} onclick={syncNow}>
+      {syncStatus?.running || submitting ? '正在同步…' : '手动同步全部'}
+    </button>
   </div>
 
-  {#if loading}
-    <p class="empty" role="status">正在读取 GitHub 数据…</p>
-  {:else if error}
-    <p class="empty danger" role="alert">{error}</p>
+  <div class="github-sync muted" role="status">
+    {#if syncStatus?.enabled === false}
+      <span>配置 GITHUB_TOKEN 后即可同步。</span>
+    {:else}
+      <span>{updatedAt ? '此列表更新于 ' + date(updatedAt) : '等待首次同步'}</span>
+      {#if syncStatus?.running}<span>正在同步全部 GitHub 数据</span>
+      {:else if syncStatus?.nextAt}<span>下次同步 {date(syncStatus.nextAt)}</span>{/if}
+      {#if !syncStatus?.running && Object.keys(syncStatus?.issues ?? {}).length}
+        <span>{Object.keys(syncStatus.issues).length} 类数据未完整同步</span>
+      {/if}
+    {/if}
+  </div>
+  {#if syncError}<p class="empty danger" role="alert">{syncError}</p>{/if}
+  {#if syncStatus?.issues?.[feed]}<p class="empty danger" role="alert">{syncStatus.issues[feed]}</p>{/if}
+  {#if error}<p class="empty danger" role="alert">{error}</p>{/if}
+
+  {#if loading && !items.length}
+    <p class="empty" role="status">正在读取本地记录…</p>
   {:else if !items.length}
-    <p class="empty">暂无记录。</p>
+    {#if updatedAt && !error}<p class="empty">暂无记录。</p>{/if}
   {:else}
     {#each items as item (item.sha ?? item.id ?? item.number)}
       <div class="row">
@@ -138,19 +189,19 @@
             <p class="metadata"><code>{item.sha.slice(0, 12)}</code><span>{item.author?.login ?? item.commit.author?.name}</span><span>{date(item.commit.author?.date)}</span>
               {#if item.commit.verification?.verified}<span class="status succeeded">签名已验证</span>{/if}
             </p>
-            <details ontoggle={(event) => loadDetail(event, item.sha)}>
+            <details>
               <summary>提交详情</summary>
               <pre>{item.commit.message}</pre>
               {@render detailState(entry)}
-              {#if entry?.data}
+              {#if entry}
                 <dl class="facts">
                   {@render fact('完整 SHA', item.sha)}
-                  {@render fact('提交者', entry.data.commit?.committer?.name)}
-                  {@render fact('变更', `+${entry.data.stats?.additions ?? 0} / −${entry.data.stats?.deletions ?? 0}`)}
+                  {@render fact('提交者', entry.commit?.committer?.name)}
+                  {@render fact('变更', `+${entry.stats?.additions ?? 0} / −${entry.stats?.deletions ?? 0}`)}
                 </dl>
-                {#if entry.data.files?.length}
+                {#if entry.files?.length}
                   <ul class="files">
-                    {#each entry.data.files as file (file.filename)}
+                    {#each entry.files as file (file.filename)}
                       <li><code>{file.filename}</code> <span class="muted">+{file.additions} / −{file.deletions}</span></li>
                     {/each}
                   </ul>
@@ -164,18 +215,18 @@
               {@render badge(item.draft ? '草稿' : prState(item))}
               <span>{item.user?.login}</span><code>{item.head?.ref} → {item.base?.ref}</code><span>更新于 {date(item.updated_at)}</span>
             </p>
-            <details ontoggle={(event) => loadDetail(event, item.number)}>
+            <details>
               <summary>PR 详情</summary>
               {@render detailState(entry)}
               <dl class="facts">
                 {@render fact('创建时间', date(item.created_at))}
                 {@render fact('审阅者', item.requested_reviewers?.map(user => user.login).join('、'))}
                 {@render fact('标签', item.labels?.map(label => label.name).join('、'))}
-                {#if entry?.data}
-                  {@render fact('提交数', entry.data.commits)}
-                  {@render fact('变更文件', entry.data.changed_files)}
-                  {@render fact('变更', `+${entry.data.additions} / −${entry.data.deletions}`)}
-                  {#if entry.data.merged_at}{@render fact('合并时间', date(entry.data.merged_at))}{/if}
+                {#if entry}
+                  {@render fact('提交数', entry.commits)}
+                  {@render fact('变更文件', entry.changed_files)}
+                  {@render fact('变更', `+${entry.additions} / −${entry.deletions}`)}
+                  {#if entry.merged_at}{@render fact('合并时间', date(entry.merged_at))}{/if}
                 {/if}
               </dl>
               {#if item.body}<pre>{item.body}</pre>{/if}
@@ -184,7 +235,7 @@
             {@const entry = details[item.id]}
             <h3>{item.display_title || item.name}</h3>
             <p class="metadata">{@render badge(item.conclusion || item.status)}<span>{item.name} #{item.run_number}</span><code>{item.head_branch}</code><span>{date(item.created_at)}</span></p>
-            <details ontoggle={(event) => loadDetail(event, item.id)}>
+            <details>
               <summary>运行详情</summary>
               <dl class="facts">
                 {@render fact('触发者', item.triggering_actor?.login || item.actor?.login)}
@@ -194,9 +245,9 @@
                 {@render fact('更新时间', date(item.updated_at))}
               </dl>
               {@render detailState(entry)}
-              {#if entry?.data?.jobs?.length}
+              {#if entry?.jobs?.length}
                 <ul class="files">
-                  {#each entry.data.jobs as job (job.id)}
+                  {#each entry.jobs as job (job.id)}
                     <li>{@render badge(job.conclusion || job.status)} {job.name} {@render external(job.html_url)}</li>
                   {/each}
                 </ul>

@@ -102,6 +102,7 @@ summary { width: fit-content; color: var(--accent); font-size: .86rem; }
 .external { white-space: nowrap; font-size: .85rem; }
 .switcher { display: flex; flex-wrap: wrap; gap: 6px; }
 .switcher [aria-pressed="true"] { background: #ede9ff; color: #3c2996; border-color: #c0b5f0; }
+.github-sync { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 10px 20px; font-size: .84rem; border-bottom: 1px solid var(--line); }
 .pagination { justify-content: center; align-items: center; color: var(--muted); font-size: .87rem; }
 dialog { max-width: min(510px, calc(100% - 32px)); border: 1px solid var(--line); border-radius: 12px; padding: 24px; }
 dialog::backdrop { background: #1d1b3180; }

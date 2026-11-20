@@ -71,13 +71,18 @@ func openHistory(values map[string]string) (history, error) {
 }
 
 func (h history) save(record deployment) error {
-	f, err := os.CreateTemp(string(h), ".deployment-*")
+	return writeStateJSON(filepath.Join(string(h), record.ID+".json"), record)
+}
+
+func writeStateJSON(path string, value any) error {
+	directory := filepath.Dir(path)
+	f, err := os.CreateTemp(directory, ".state-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
-	if err := json.NewEncoder(f).Encode(record); err != nil {
+	if err := json.NewEncoder(f).Encode(value); err != nil {
 		return err
 	}
 	if err := f.Sync(); err != nil {
@@ -86,14 +91,14 @@ func (h history) save(record deployment) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(f.Name(), filepath.Join(string(h), record.ID+".json")); err != nil {
+	if err := os.Rename(f.Name(), path); err != nil {
 		return err
 	}
 	// Windows does not support fsync on a directory opened by os.Open.
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	dir, err := os.Open(string(h))
+	dir, err := os.Open(directory)
 	if err != nil {
 		return err
 	}

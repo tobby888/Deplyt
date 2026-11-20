@@ -71,7 +71,7 @@ func run(logger *slog.Logger) error {
 	})
 	mux.HandleFunc("POST /v1/deploy/photolib", relay.handleDeploy)
 	console := http.NewServeMux()
-	github := newGitHub(cfg.values["GITHUB_TOKEN"])
+	github := openGitHubSync(newGitHub(cfg.values["GITHUB_TOKEN"]), string(store), logger)
 	dispatch := &workflowDispatch{endpoint: photoLibAPI, token: cfg.values["GITHUB_ACTIONS_TOKEN"], client: outboundClient(12 * time.Second)}
 	brand := &branding{origin: auth.photoLib, client: outboundClient(3 * time.Second)}
 	console.HandleFunc("GET /brand-icon", brand.serve)
@@ -120,6 +120,8 @@ func run(logger *slog.Logger) error {
 	console.HandleFunc("POST /api/deployments/{id}/rollback", auth.requireAdmin(relay.handleRollback))
 	console.HandleFunc("GET /api/github/{section}", auth.requireAdmin(github.list))
 	console.HandleFunc("GET /api/github/{section}/{id}", auth.requireAdmin(github.detail))
+	console.HandleFunc("GET /api/github/sync", auth.requireAdmin(github.syncStatus))
+	console.HandleFunc("POST /api/github/sync", auth.requireAdmin(github.syncNow))
 	if err := registerUI(console); err != nil {
 		return err
 	}
@@ -135,7 +137,15 @@ func run(logger *slog.Logger) error {
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	syncDone := make(chan struct{})
+	go func() {
+		defer close(syncDone)
+		github.run(ctx)
+	}()
+	defer func() {
+		stop()
+		<-syncDone
+	}()
 	serverErr := make(chan error, 1)
 	go func() {
 		logger.Info("relay listening", "address", cfg.listenAddr)

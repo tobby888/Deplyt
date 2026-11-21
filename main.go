@@ -44,7 +44,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	if cfg.adminID == 0 && auth.secret == "" && auth.emergency == nil {
-		return errors.New("configure DEPLOY_ADMIN_PHOTOLIB_ID, DEPLYT_SSO_SECRET, or DEPLOY_EMERGENCY_PASSWORD_HASH to enable console administration")
+		return errors.New("configure DEPLOY_ADMIN_PHOTOLIB_ID, IDP_CLIENT_SECRET, DEPLYT_SSO_SECRET, or DEPLOY_EMERGENCY_PASSWORD_HASH to enable console administration")
 	}
 	store, err := openHistory(cfg.values)
 	if err != nil {
@@ -55,11 +55,12 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	relay := &relay{
-		history: store,
-		token:   cfg.token,
-		deploy:  cfg.production.deploy,
-		logger:  logger,
-		maxSize: maxJARSize,
+		history:          store,
+		token:            cfg.token,
+		deploy:           cfg.production.deploy,
+		deployWithDBSync: cfg.production.deployWithOptions,
+		logger:           logger,
+		maxSize:          maxJARSize,
 	}
 	if cfg.archive.uploadClient != nil {
 		relay.archive = cfg.archive.upload

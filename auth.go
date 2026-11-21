@@ -27,6 +27,7 @@ const (
 type administrator struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
+	Admin    bool   `json:"admin,omitempty"`
 }
 
 type adminSession struct {
@@ -37,37 +38,66 @@ type adminSession struct {
 }
 
 type consoleAuth struct {
-	origin    string
-	photoLib  string
-	secret    string
-	client    *http.Client
-	mu        sync.Mutex
-	sessions  map[string]adminSession
-	pairings  map[string]*pairing
-	access    *accessRegistry
-	photo     photoLibClient
-	emergency *emergencyPassword
+	origin        string
+	photoLib      string
+	idpOrigin     string
+	clientID      string
+	authorizePath string
+	tokenPath     string
+	secret        string
+	client        *http.Client
+	mu            sync.Mutex
+	sessions      map[string]adminSession
+	pairings      map[string]*pairing
+	access        *accessRegistry
+	photo         photoLibClient
+	emergency     *emergencyPassword
 }
 
 func newConsoleAuth(values map[string]string) (*consoleAuth, error) {
-	origin, err := httpsOrigin(values["DEPLYT_PUBLIC_URL"])
+	origin, err := httpsOrigin(strings.Trim(values["DEPLYT_PUBLIC_URL"], `'" `))
 	if err != nil {
 		return nil, errors.New("DEPLYT_PUBLIC_URL must be an HTTPS origin")
 	}
-	photoLib, err := httpsOrigin(values["PHOTOLIB_PUBLIC_URL"])
-	if err != nil {
-		return nil, errors.New("PHOTOLIB_PUBLIC_URL must be an HTTPS origin")
+	rawIDP := strings.Trim(values["IDP_PUBLIC_URL"], `'" `)
+	rawPhoto := strings.Trim(values["PHOTOLIB_PUBLIC_URL"], `'" `)
+	if rawPhoto == "" {
+		rawPhoto = rawIDP
 	}
-	secret := values["DEPLYT_SSO_SECRET"]
+	photoLib, err := httpsOrigin(rawPhoto)
+	if err != nil {
+		return nil, errors.New("PHOTOLIB_PUBLIC_URL or IDP_PUBLIC_URL must be an HTTPS origin")
+	}
+	idpOrigin := photoLib
+	authorizePath := "/deplyt/authorize"
+	tokenPath := "/api/v1/auth/deplyt/token"
+	if rawIDP != "" {
+		idpOrigin, err = httpsOrigin(rawIDP)
+		if err != nil {
+			return nil, errors.New("IDP_PUBLIC_URL must be an HTTPS origin")
+		}
+		authorizePath = "/oauth/authorize"
+		tokenPath = "/api/v1/oauth/token"
+	}
+	clientID := strings.TrimSpace(values["IDP_CLIENT_ID"])
+	if clientID == "" {
+		clientID = "deplyt"
+	}
+	secret := strings.Trim(values["IDP_CLIENT_SECRET"], `'"`)
+	if secret == "" {
+		secret = strings.Trim(values["DEPLYT_SSO_SECRET"], `'"`)
+	}
 	if secret != "" && (len(secret) < 32 || strings.ContainsAny(secret, " \t\r\n")) {
-		return nil, errors.New("DEPLYT_SSO_SECRET must have at least 32 characters and no whitespace")
+		return nil, errors.New("IDP_CLIENT_SECRET / DEPLYT_SSO_SECRET must have at least 32 characters and no whitespace")
 	}
 	emergency, err := parseEmergencyPassword(values["DEPLOY_EMERGENCY_PASSWORD_HASH"])
 	if err != nil {
 		return nil, err
 	}
 	return &consoleAuth{
-		origin: origin, photoLib: photoLib, secret: secret, sessions: make(map[string]adminSession),
+		origin: origin, photoLib: photoLib, idpOrigin: idpOrigin, clientID: clientID,
+		authorizePath: authorizePath, tokenPath: tokenPath, secret: secret,
+		sessions:  make(map[string]adminSession),
 		client:    &http.Client{Timeout: 10 * time.Second, CheckRedirect: rejectRedirect},
 		pairings:  make(map[string]*pairing),
 		photo:     photoLibClient{origin: photoLib, http: outboundClient(8 * time.Second)},
@@ -115,9 +145,17 @@ func (a *consoleAuth) start(w http.ResponseWriter, r *http.Request) {
 	}
 	state, verifier := randomToken(), randomToken()
 	hash := sha256.Sum256([]byte(verifier))
-	query := url.Values{"state": {state}, "challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}}
+	challenge := base64.RawURLEncoding.EncodeToString(hash[:])
+	query := url.Values{"state": {state}, "challenge": {challenge}}
+	if a.authorizePath == "/oauth/authorize" {
+		query.Set("client_id", a.clientID)
+		query.Set("redirect_uri", a.origin+"/auth/callback")
+		query.Set("response_type", "code")
+		query.Set("code_challenge", challenge)
+		query.Set("code_challenge_method", "S256")
+	}
 	authCookie(w, loginCookie, state+"."+verifier, 600)
-	http.Redirect(w, r, a.photoLib+"/deplyt/authorize?"+query.Encode(), http.StatusSeeOther)
+	http.Redirect(w, r, a.idpOrigin+a.authorizePath+"?"+query.Encode(), http.StatusSeeOther)
 }
 
 func (a *consoleAuth) callback(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +181,7 @@ func (a *consoleAuth) callback(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?login=failed", http.StatusSeeOther)
 		return
 	}
-	privileged := a.access == nil || a.access.admin == 0 || admin.ID == strconv.FormatInt(a.access.admin, 10)
+	privileged := admin.Admin || a.access == nil || a.access.admin == 0 || admin.ID == strconv.FormatInt(a.access.admin, 10)
 	if !privileged && a.access != nil {
 		id, err := strconv.ParseInt(admin.ID, 10, 64)
 		if err != nil || id <= 0 || a.access.register(photoLibUser{ID: id, Username: admin.Username}) != nil {
@@ -159,16 +197,24 @@ func (a *consoleAuth) callback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *consoleAuth) exchange(ctx context.Context, code, verifier string) (administrator, error) {
-	body, err := json.Marshal(map[string]string{"code": code, "verifier": verifier})
+	payload := map[string]string{"code": code, "verifier": verifier}
+	if a.tokenPath == "/api/v1/oauth/token" {
+		payload["clientId"] = a.clientID
+		payload["redirectUri"] = a.origin + "/auth/callback"
+		payload["code_verifier"] = verifier
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return administrator{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, a.photoLib+"/api/v1/auth/deplyt/token", bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, a.idpOrigin+a.tokenPath, bytes.NewReader(body))
 	if err != nil {
 		return administrator{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Deplyt-Client-Secret", a.secret)
+	request.Header.Set("X-Idp-Client-Id", a.clientID)
+	request.Header.Set("X-Idp-Client-Secret", a.secret)
 	response, err := a.client.Do(request)
 	if err != nil {
 		return administrator{}, err
@@ -181,7 +227,7 @@ func (a *consoleAuth) exchange(ctx context.Context, code, verifier string) (admi
 	if response.StatusCode != http.StatusOK ||
 		json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&result) != nil ||
 		result.Code != "OK" || result.Data.ID == "" || result.Data.Username == "" {
-		return administrator{}, errors.New("PhotoLib denied the authorization code")
+		return administrator{}, errors.New("IdP or PhotoLib denied the authorization code")
 	}
 	return result.Data, nil
 }

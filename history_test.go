@@ -23,6 +23,7 @@ func TestRollbackReusesArchiveAndRecordsOperator(t *testing.T) {
 	}
 
 	var activated int
+	var syncedTarget string
 	relay := &relay{
 		history: store, logger: slog.New(slog.DiscardHandler),
 		downloadURL: func(_ context.Context, key string) (string, error) {
@@ -39,14 +40,19 @@ func TestRollbackReusesArchiveAndRecordsOperator(t *testing.T) {
 			}
 			return nil
 		},
+		deployWithDBSync: func(_ context.Context, _ artifact, _, _, restoreFrom string, _ *slog.Logger) error {
+			activated++
+			syncedTarget = restoreFrom
+			return nil
+		},
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/deployments/"+target.ID+"/rollback", nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/deployments/"+target.ID+"/rollback", strings.NewReader(`{"restoreDatabase":true}`))
 	request.SetPathValue("id", target.ID)
 	w := httptest.NewRecorder()
 	operator := administrator{ID: "10", Username: "alice"}
 	relay.handleRollback(w, request, operator)
-	if w.Code != http.StatusNoContent || activated != 1 {
-		t.Fatalf("rollback failed: %d %s", w.Code, w.Body)
+	if w.Code != http.StatusNoContent || activated != 1 || syncedTarget != target.ID {
+		t.Fatalf("rollback failed: %d %s (syncedTarget=%s)", w.Code, w.Body, syncedTarget)
 	}
 
 	reopened, err := openHistory(map[string]string{"DEPLOY_STATE_DIR": dir})
@@ -59,7 +65,7 @@ func TestRollbackReusesArchiveAndRecordsOperator(t *testing.T) {
 	}
 	rollback := records[0]
 	if rollback.Kind != "rollback" || rollback.Status != "succeeded" ||
-		rollback.Target != target.ID || rollback.Finished == nil ||
+		rollback.Target != target.ID || !rollback.RestoreDatabase || rollback.Finished == nil ||
 		rollback.Operator != operator || rollback.Commit != target.Commit {
 		t.Errorf("unexpected rollback record: %+v", rollback)
 	}

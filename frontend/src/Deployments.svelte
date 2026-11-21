@@ -10,6 +10,8 @@
   let busy = $state(false)
   let workflowURL = $state('')
   let target = $state(null)
+  let restoreDatabase = $state(false)
+  let dbConfirmText = $state('')
   let dialog
   let current = $derived(records.find(record => record.status === 'succeeded'))
   let latest = $derived(records[0])
@@ -56,19 +58,34 @@
 
   function confirm(record) {
     target = record
+    restoreDatabase = false
+    dbConfirmText = ''
     dialog.showModal()
   }
 
   async function rollback(event) {
     event.preventDefault()
     if (busy || !target) return
+    if (restoreDatabase && dbConfirmText.trim() !== '确认回滚数据库') {
+      feedback = '已勾选同步回滚数据库，请输入“确认回滚数据库”以继续。'
+      return
+    }
     const id = target.id
+    const withDB = restoreDatabase
     dialog.close()
     busy = true
-    feedback = '正在从 OSS 下载并验证目标版本，等待生产服务重启…'
+    feedback = withDB
+      ? '正在从 OSS 下载目标版本并同步恢复部署前数据库快照，等待生产服务重启…'
+      : '正在从 OSS 下载并验证目标版本，等待生产服务重启…'
     try {
-      await api(`/api/deployments/${id}/rollback`, { method: 'POST' })
-      feedback = '回滚完成，生产服务已通过状态检查。'
+      await api(`/api/deployments/${id}/rollback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ restoreDatabase: withDB }),
+      })
+      feedback = withDB
+        ? 'JAR 与部署前数据库快照已同步回滚，生产服务已通过状态检查。'
+        : '回滚完成，生产服务已通过状态检查。'
     } catch (err) {
       if (err.status === 401) onExpired()
       feedback = '回滚请求未完成。' + err.message
@@ -134,6 +151,7 @@
         <div class="row-title">
           <span class={'status ' + record.status}>{labels[record.status] ?? record.status}</span>
           <strong>{kinds[record.kind] ?? record.kind}</strong>
+          {#if record.restoreDatabase}<span class="status running">含数据库同步回滚</span>{/if}
           <span class="muted">{date(record.started)}</span>
         </div>
         <p class="file-name">{record.originalName}</p>
@@ -169,9 +187,21 @@
     <h2 id="rollback-title">确认回滚生产版本</h2>
     <p>生产服务将短暂进入维护模式，并切换到以下 OSS 归档。</p>
     <p><code>{target?.name}</code></p>
+    <div style="margin-top:14px;padding:12px;border:1px solid var(--line);border-radius:8px">
+      <label style="display:flex;gap:8px;align-items:flex-start;font-size:.9rem">
+        <input type="checkbox" bind:checked={restoreDatabase} />
+        <span><strong>同时回滚数据库到此版本部署前的快照</strong>（高危：将覆盖该时间点之后产生的新数据，回滚前会自动留存当前库备份）</span>
+      </label>
+      {#if restoreDatabase}
+        <label style="display:grid;gap:4px;margin-top:10px;font-size:.86rem">
+          请输入 <code>确认回滚数据库</code> 以确认高危操作：
+          <input style="padding:7px 10px;border:1px solid #cbd1de;border-radius:6px;font:inherit" bind:value={dbConfirmText} placeholder="确认回滚数据库" required />
+        </label>
+      {/if}
+    </div>
     <div class="dialog-actions">
       <button type="button" class="button" onclick={() => dialog.close()}>取消</button>
-      <button type="submit" class="button destructive">确认回滚</button>
+      <button type="submit" class="button destructive" disabled={restoreDatabase && dbConfirmText.trim() !== '确认回滚数据库'}>确认回滚</button>
     </div>
   </form>
 </dialog>

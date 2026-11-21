@@ -34,6 +34,10 @@ type productionServer struct {
 }
 
 func (p productionServer) deploy(ctx context.Context, jar artifact, stageID, downloadURL string, logger *slog.Logger) error {
+	return p.deployWithOptions(ctx, jar, stageID, downloadURL, "", logger)
+}
+
+func (p productionServer) deployWithOptions(ctx context.Context, jar artifact, stageID, downloadURL, restoreDBFrom string, logger *slog.Logger) error {
 	// The presigned URL is sent over SSH stdin, outside the command, curl arguments, and logs.
 	curlConfig := fmt.Sprintf("url = %q\n", downloadURL)
 	for attempt := 1; ; attempt++ {
@@ -56,6 +60,10 @@ func (p productionServer) deploy(ctx context.Context, jar artifact, stageID, dow
 		if err == nil {
 			logger.Info("production JAR transferred and verified", "attempt", attempt)
 			command := fmt.Sprintf("DEPLOY_DIR='%s' JAR_NAME='%s' RUN_ID='%s' bash -s", productionDir, jar.name, runID)
+			if restoreDBFrom != "" {
+				command = fmt.Sprintf("DEPLOY_DIR='%s' JAR_NAME='%s' RUN_ID='%s' RESTORE_DB_FROM='%s' bash -s",
+					productionDir, jar.name, runID, restoreDBFrom)
+			}
 			output, err := p.run(ctx, sshRestartTimeout, command, strings.NewReader(restartScript))
 			if err != nil {
 				return fmt.Errorf("switch JAR and restart photolib: %w; output: %s", err, output)

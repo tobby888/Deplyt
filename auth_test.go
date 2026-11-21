@@ -89,3 +89,64 @@ func TestConsoleSSOAndOriginCheck(t *testing.T) {
 		t.Fatal("unexpected admin session or CSRF behavior")
 	}
 }
+
+func TestConsoleIdpOAuthLogin(t *testing.T) {
+	var challenge string
+	auth, err := newConsoleAuth(map[string]string{
+		"DEPLYT_PUBLIC_URL":   "https://deploy.example.test",
+		"PHOTOLIB_PUBLIC_URL": "https://photolib.example.test",
+		"IDP_PUBLIC_URL":      "https://auth.example.test",
+		"IDP_CLIENT_ID":       "deplyt",
+		"IDP_CLIENT_SECRET":   "'" + testToken + "'",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body map[string]string
+		if r.URL.String() != "https://auth.example.test/api/v1/oauth/token" ||
+			r.Header.Get("X-Idp-Client-Id") != "deplyt" ||
+			r.Header.Get("X-Idp-Client-Secret") != testToken ||
+			json.NewDecoder(r.Body).Decode(&body) != nil ||
+			body["clientId"] != "deplyt" || !validToken(body["code"]) {
+			t.Errorf("unexpected IdP token exchange: %s %v", r.URL, body)
+		}
+		digest := sha256.Sum256([]byte(body["code_verifier"]))
+		if challenge != base64.RawURLEncoding.EncodeToString(digest[:]) {
+			t.Error("exchanged PKCE verifier does not match challenge")
+		}
+		rec := httptest.NewRecorder()
+		writeJSON(rec, map[string]any{
+			"code": "OK",
+			"data": administrator{ID: "88", Username: "idp-admin", Admin: true},
+		})
+		return rec.Result(), nil
+	})}
+
+	start := httptest.NewRecorder()
+	auth.start(start, httptest.NewRequest(http.MethodGet, "/auth/start", nil))
+	redirect, err := url.Parse(start.Header().Get("Location"))
+	if err != nil || redirect.Host != "auth.example.test" || redirect.Path != "/oauth/authorize" ||
+		redirect.Query().Get("client_id") != "deplyt" ||
+		redirect.Query().Get("redirect_uri") != "https://deploy.example.test/auth/callback" {
+		t.Fatalf("unexpected IdP authorize redirect: %s", start.Header().Get("Location"))
+	}
+	challenge = redirect.Query().Get("code_challenge")
+	state := redirect.Query().Get("state")
+	login := start.Result().Cookies()[0]
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?state="+state+"&code="+randomToken(), nil)
+	req.AddCookie(login)
+	res := httptest.NewRecorder()
+	auth.callback(res, req)
+	if res.Header().Get("Location") != "/" {
+		t.Fatalf("IdP callback failed: %s", res.Header().Get("Location"))
+	}
+	session := res.Result().Cookies()[1]
+	r := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	r.AddCookie(session)
+	identity, err := auth.identity(r)
+	if err != nil || !identity.Admin || !identity.Allowed || identity.Username != "idp-admin" {
+		t.Fatalf("unexpected IdP identity: %+v %v", identity, err)
+	}
+}

@@ -43,8 +43,9 @@ curl -fsS http://127.0.0.1:8080/healthz
 | `OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` | Deplyt 专用 RAM 凭据，仅需访问下述 JAR 前缀。 |
 | `OSS_ECS_RAM_ROLE` | 在阿里云 ECS 上部署时，可填实例绑定的 RAM 角色名。SDK 自动取得并更新临时凭据。此模式无需填写 AccessKey。 |
 | `DEPLYT_PUBLIC_URL`、`PHOTOLIB_PUBLIC_URL` | Deplyt 和 PhotoLib 的 HTTPS 源地址，例如 `https://deploy.example.com`，带非默认端口时需填写端口。 |
-| `DEPLOY_ADMIN_PHOTOLIB_ID` | 指定可通过 PhotoLib 登录取得 Deplyt 管理权限的用户数字 ID。 |
-| `DEPLYT_SSO_SECRET` | 可选的 PhotoLib 管理员单点登录密钥。通过 `openssl rand -hex 32` 生成，并在 PhotoLib 和 Deplyt 填入相同值。 |
+| `IDP_PUBLIC_URL`、`IDP_CLIENT_ID`、`IDP_CLIENT_SECRET` | PhotolibIdp 统一认证中心的 HTTPS 源地址、应用 Client ID（默认 `deplyt`）与密钥。配置后通过 PhotolibIdp 完成单点登录与访问准入控制。 |
+| `DEPLOY_ADMIN_PHOTOLIB_ID` | 指定可通过登录取得 Deplyt 管理权限的用户数字 ID（PhotolibIdp 的系统管理员默认具备管理权限）。 |
+| `DEPLYT_SSO_SECRET` | 兼容旧版 PhotoLib 管理员单点登录的密钥。 |
 | `DEPLOY_EMERGENCY_PASSWORD_HASH` | 可选的应急管理员密码哈希。使用 Deplyt 的密码生成命令配置。 |
 | `GITHUB_TOKEN` | 仅在 Deplyt 后端使用，限定到 `tobby888/Photolib` 的细粒度 PAT。 |
 | `GITHUB_ACTIONS_TOKEN` | 限定到 PhotoLib 仓库、具有 `Actions: write` 权限的细粒度 PAT。启用控制台的手动工作流。 |
@@ -59,6 +60,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 3. 对象键为 `deplyt/photolib/photolib-backend-<run-id>-<部署记录ID>-<完整sha256>.jar`。每次 CI 上传分配独立 ID，重跑也会保留自己的归档。对象按私有 ACL 写入。部署失败或回滚都保留已上传的对象。
 4. 生产机需提供 `curl`、`bash`、`sha256sum`、`flock`、现有的 `maint-on`、`maint-off` 和 `photolib.service`。目录 `/opt/Photolib` 应仅有一个匹配 `photolib-backend-*.jar` 的运行包。切换过程中临时把旧包移出匹配范围，新服务启动失败时尝试恢复旧包。
 5. 控制台可选择曾部署成功的归档，确认后从原对象下载并校验，再执行同一套切换流程。回滚记录保留原 SHA-256、来源提交、运行编号和操作管理员。控制台显示最后确认版本，超时或进程中断后可通过日志核实生产状态。首次上线前的部署没有 Deplyt 记录。
+6. **数据库快照与联动回滚**：每次停机切换前（处于 `maint-on` 维护期内），`restart.sh` 自动从生产目录 `.env` 解析 MySQL 连接信息并生成部署前逻辑快照（`.db-snapshot-<部署ID>.sql.gz`）。若新 JAR 启动或状态检查失败，脚本在自动切回旧 JAR 的同时会自动恢复发版前数据库快照。在控制台执行手动版本回滚时，默认仅回滚 JAR；管理员也可显式勾选「同时回滚数据库到此版本部署前的快照」并输入确认口令，脚本会先将当前数据库备份为 `.db-before-rollback-<运行ID>.sql.gz`，再将数据库与 JAR 同步回滚到目标版本。
 
 ## 使用令牌部署 OSS 制品
 

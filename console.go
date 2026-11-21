@@ -232,7 +232,7 @@ func (a *consoleAuth) identity(r *http.Request) (consoleIdentity, error) {
 		session.Username = user.Username
 	}
 	userID, _ := strconv.ParseInt(session.ID, 10, 64)
-	allowed := session.privileged || (userID > 0 && a.access != nil && a.access.allowed(userID))
+	allowed := session.privileged || a.authorizePath == "/oauth/authorize" || (userID > 0 && a.access != nil && a.access.allowed(userID))
 	return consoleIdentity{administrator: session.administrator, Admin: session.privileged, Allowed: allowed}, nil
 }
 

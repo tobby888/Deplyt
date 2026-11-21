@@ -24,22 +24,23 @@ var (
 )
 
 type deployment struct {
-	ID           string        `json:"id"`
-	Kind         string        `json:"kind"`
-	Status       string        `json:"status"`
-	Message      string        `json:"message,omitempty"`
-	Name         string        `json:"name"`
-	OriginalName string        `json:"originalName"`
-	Object       string        `json:"object"`
-	SHA256       string        `json:"sha256"`
-	Archived     bool          `json:"archived"`
-	Size         int64         `json:"size"`
-	Run          string        `json:"run"`
-	Commit       string        `json:"commit,omitempty"`
-	Operator     administrator `json:"operator"`
-	Target       string        `json:"target,omitempty"`
-	Started      time.Time     `json:"started"`
-	Finished     *time.Time    `json:"finished,omitempty"`
+	ID              string        `json:"id"`
+	Kind            string        `json:"kind"`
+	Status          string        `json:"status"`
+	Message         string        `json:"message,omitempty"`
+	Name            string        `json:"name"`
+	OriginalName    string        `json:"originalName"`
+	Object          string        `json:"object"`
+	SHA256          string        `json:"sha256"`
+	Archived        bool          `json:"archived"`
+	Size            int64         `json:"size"`
+	Run             string        `json:"run"`
+	Commit          string        `json:"commit,omitempty"`
+	Operator        administrator `json:"operator"`
+	Target          string        `json:"target,omitempty"`
+	RestoreDatabase bool          `json:"restoreDatabase,omitempty"`
+	Started         time.Time     `json:"started"`
+	Finished        *time.Time    `json:"finished,omitempty"`
 }
 
 type history string
@@ -187,10 +188,20 @@ func (s *relay) handleRollback(w http.ResponseWriter, r *http.Request, admin adm
 	if r.Context().Err() != nil {
 		return
 	}
+	var options struct {
+		RestoreDatabase bool `json:"restoreDatabase"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		body := http.MaxBytesReader(w, r.Body, 1024)
+		if err := json.NewDecoder(body).Decode(&options); err != nil {
+			http.Error(w, "无效的回滚参数", http.StatusBadRequest)
+			return
+		}
+	}
 
 	record := target
 	record.ID, record.Kind, record.Status = strings.ToLower(rand.Text()), "rollback", "running"
-	record.Operator, record.Target = admin, target.ID
+	record.Operator, record.Target, record.RestoreDatabase = admin, target.ID, options.RestoreDatabase
 	record.Started, record.Finished = time.Now().UTC(), nil
 	if err := s.history.save(record); err != nil {
 		s.logger.Error("create rollback record", "error", err)
@@ -206,8 +217,12 @@ func (s *relay) handleRollback(w http.ResponseWriter, r *http.Request, admin adm
 }
 
 func (s *relay) apply(w http.ResponseWriter, ctx context.Context, record deployment) bool {
-	logger := s.logger.With("deployment_id", record.ID, "run_id", record.Run, "object", record.Object)
-	err := s.activate(ctx, artifact{name: record.Name, key: record.Object, sha256: record.SHA256}, record.ID, logger)
+	logger := s.logger.With("deployment_id", record.ID, "run_id", record.Run, "object", record.Object, "restore_db", record.RestoreDatabase)
+	restoreFrom := ""
+	if record.RestoreDatabase {
+		restoreFrom = record.Target
+	}
+	err := s.activateWithOptions(ctx, artifact{name: record.Name, key: record.Object, sha256: record.SHA256}, record.ID, restoreFrom, logger)
 	return s.finishDeployment(w, record, err, logger)
 }
 

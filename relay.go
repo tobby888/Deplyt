@@ -33,14 +33,15 @@ type artifact struct {
 }
 
 type relay struct {
-	token       string
-	maxSize     int64
-	logger      *slog.Logger
-	archive     func(context.Context, string, string, *os.File) error
-	downloadURL func(context.Context, string) (string, error)
-	deploy      func(context.Context, artifact, string, string, *slog.Logger) error
-	mu          sync.Mutex
-	history     history
+	token            string
+	maxSize          int64
+	logger           *slog.Logger
+	archive          func(context.Context, string, string, *os.File) error
+	downloadURL      func(context.Context, string) (string, error)
+	deploy           func(context.Context, artifact, string, string, *slog.Logger) error
+	deployWithDBSync func(context.Context, artifact, string, string, string, *slog.Logger) error
+	mu               sync.Mutex
+	history          history
 }
 
 func (s *relay) handleDeploy(w http.ResponseWriter, r *http.Request) {
@@ -195,12 +196,19 @@ func (s *relay) publish(w http.ResponseWriter, ctx context.Context, staged artif
 }
 
 func (s *relay) activate(ctx context.Context, jar artifact, stageID string, logger *slog.Logger) error {
+	return s.activateWithOptions(ctx, jar, stageID, "", logger)
+}
+
+func (s *relay) activateWithOptions(ctx context.Context, jar artifact, stageID, restoreDBFrom string, logger *slog.Logger) error {
 	if s.downloadURL == nil {
 		return errors.New("OSS archive credentials are not configured")
 	}
 	downloadURL, err := s.downloadURL(ctx, jar.key)
 	if err != nil {
 		return errors.New("cannot sign OSS download")
+	}
+	if restoreDBFrom != "" && s.deployWithDBSync != nil {
+		return s.deployWithDBSync(ctx, jar, stageID, downloadURL, restoreDBFrom, logger)
 	}
 	return s.deploy(ctx, jar, stageID, downloadURL, logger)
 }

@@ -88,3 +88,84 @@ func TestRollbackReusesArchiveAndRecordsOperator(t *testing.T) {
 		t.Fatal("an unconfirmed deployment was eligible for rollback")
 	}
 }
+
+func TestSwitchBetweenJARAndNativeDeployments(t *testing.T) {
+	dir := t.TempDir()
+	store := history(dir)
+	commit := strings.Repeat("c", 40)
+	jarTarget := deployment{
+		ID: strings.Repeat("a", 26), Name: testJARName, OriginalName: testJARName,
+		Object: archivePrefix + testJARName, SHA256: strings.Repeat("1", 64),
+		Status: "succeeded", Archived: true, Kind: "deploy", Run: "555", Commit: commit,
+		Started: time.Now().Add(-2 * time.Minute),
+	}
+	nativeTarget := deployment{
+		ID: strings.Repeat("b", 26), Name: testNativeName, OriginalName: testNativeName,
+		Object: archivePrefix + testNativeName, SHA256: strings.Repeat("2", 64),
+		Format: artifactFormatNative, Status: "archived", Archived: true, Kind: "deploy", Run: "555", Commit: commit,
+		Started: time.Now().Add(-time.Minute),
+	}
+	if err := store.save(jarTarget); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.save(nativeTarget); err != nil {
+		t.Fatal(err)
+	}
+
+	var deployed []artifact
+	relay := &relay{
+		history: store, logger: slog.New(slog.DiscardHandler),
+		downloadURL: func(_ context.Context, key string) (string, error) {
+			return "https://oss.example/" + key, nil
+		},
+		deploy: func(_ context.Context, art artifact, _, _ string, _ *slog.Logger) error {
+			deployed = append(deployed, art)
+			return nil
+		},
+	}
+	operator := administrator{ID: "1", Username: "admin"}
+
+	// Archived-only native target must reject restoreDatabase=true because no snapshot exists.
+	reqBad := httptest.NewRequest(http.MethodPost, "/api/deployments/"+nativeTarget.ID+"/switch", strings.NewReader(`{"restoreDatabase":true}`))
+	reqBad.SetPathValue("id", nativeTarget.ID)
+	w := httptest.NewRecorder()
+	relay.handleSwitch(w, reqBad, operator)
+	if w.Code != http.StatusBadRequest || len(deployed) != 0 {
+		t.Fatalf("expected 400 for DB restore on archived-only target, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Switch to archived native image bundle.
+	reqNative := httptest.NewRequest(http.MethodPost, "/api/deployments/"+nativeTarget.ID+"/switch", nil)
+	reqNative.SetPathValue("id", nativeTarget.ID)
+	w = httptest.NewRecorder()
+	relay.handleSwitch(w, reqNative, operator)
+	if w.Code != http.StatusNoContent || len(deployed) != 1 {
+		t.Fatalf("switch to native failed: %d %s", w.Code, w.Body.String())
+	}
+	if deployed[0].format != artifactFormatNative || deployed[0].name != testNativeName || deployed[0].sha256 != nativeTarget.SHA256 {
+		t.Fatalf("unexpected native artifact deployed: %+v", deployed[0])
+	}
+
+	// Switch back to legacy JAR record (which had empty Format on disk).
+	reqJAR := httptest.NewRequest(http.MethodPost, "/api/deployments/"+jarTarget.ID+"/switch", strings.NewReader(`{}`))
+	reqJAR.SetPathValue("id", jarTarget.ID)
+	w = httptest.NewRecorder()
+	relay.handleSwitch(w, reqJAR, operator)
+	if w.Code != http.StatusNoContent || len(deployed) != 2 {
+		t.Fatalf("switch back to JAR failed: %d %s", w.Code, w.Body.String())
+	}
+	if deployed[1].format != artifactFormatJAR || deployed[1].name != testJARName || deployed[1].sha256 != jarTarget.SHA256 {
+		t.Fatalf("unexpected JAR artifact deployed: %+v", deployed[1])
+	}
+
+	records, err := store.list()
+	if err != nil || len(records) != 4 {
+		t.Fatalf("expected 4 persisted records, got %d: %v", len(records), err)
+	}
+	if records[0].Kind != "switch" || records[0].Format != artifactFormatJAR || records[0].Target != jarTarget.ID || records[0].Status != "succeeded" {
+		t.Fatalf("unexpected switch-to-JAR record: %+v", records[0])
+	}
+	if records[1].Kind != "switch" || records[1].Format != artifactFormatNative || records[1].Target != nativeTarget.ID || records[1].Status != "succeeded" {
+		t.Fatalf("unexpected switch-to-native record: %+v", records[1])
+	}
+}

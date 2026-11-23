@@ -119,6 +119,7 @@ func run(logger *slog.Logger) error {
 	console.HandleFunc("POST /api/deployments/workflow", auth.protect(grantedAccess, dispatch.handle(logger)))
 	console.HandleFunc("POST /api/deployments/oss", auth.protect(grantedAccess, relay.handleOSS(cfg.manualOSS, outboundClient(uploadTimeout))))
 	console.HandleFunc("POST /api/deployments/{id}/rollback", auth.requireAdmin(relay.handleRollback))
+	console.HandleFunc("POST /api/deployments/{id}/switch", auth.requireAdmin(relay.handleSwitch))
 	console.HandleFunc("GET /api/github/{section}", auth.requireAdmin(github.list))
 	console.HandleFunc("GET /api/github/{section}/{id}", auth.requireAdmin(github.detail))
 	console.HandleFunc("GET /api/github/sync", auth.requireAdmin(github.syncStatus))

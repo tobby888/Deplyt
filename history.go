@@ -174,6 +174,14 @@ func (s *relay) handleHistory(w http.ResponseWriter, _ *http.Request, _ administ
 }
 
 func (s *relay) handleRollback(w http.ResponseWriter, r *http.Request, admin administrator) {
+	s.handleActivateRecord(w, r, admin, "rollback", false)
+}
+
+func (s *relay) handleSwitch(w http.ResponseWriter, r *http.Request, admin administrator) {
+	s.handleActivateRecord(w, r, admin, "switch", true)
+}
+
+func (s *relay) handleActivateRecord(w http.ResponseWriter, r *http.Request, admin administrator, kind string, allowArchived bool) {
 	if !s.mu.TryLock() {
 		http.Error(w, "已有部署或回滚正在进行", http.StatusConflict)
 		return
@@ -181,17 +189,22 @@ func (s *relay) handleRollback(w http.ResponseWriter, r *http.Request, admin adm
 	defer s.mu.Unlock()
 
 	target, err := s.history.load(r.PathValue("id"))
-	if errors.Is(err, os.ErrNotExist) || (err == nil && (!target.Archived || target.Status != "succeeded")) {
-		http.Error(w, "找不到已验证成功的 OSS 版本", http.StatusNotFound)
+	eligible := err == nil && target.Archived && (target.Status == "succeeded" || (allowArchived && target.Status == "archived"))
+	if errors.Is(err, os.ErrNotExist) || (err == nil && !eligible) {
+		if allowArchived {
+			http.Error(w, "找不到可切换的 OSS 归档版本", http.StatusNotFound)
+		} else {
+			http.Error(w, "找不到已验证成功的 OSS 版本", http.StatusNotFound)
+		}
 		return
 	}
 	if err != nil {
-		s.logger.Error("load rollback target", "error", err)
-		http.Error(w, "无法读取回滚版本", http.StatusInternalServerError)
+		s.logger.Error("load activation target", "kind", kind, "error", err)
+		http.Error(w, "无法读取目标版本", http.StatusInternalServerError)
 		return
 	}
 	if s.downloadURL == nil {
-		http.Error(w, "回滚需要配置 OSS 归档凭证", http.StatusServiceUnavailable)
+		http.Error(w, "切换或回滚需要配置 OSS 归档凭证", http.StatusServiceUnavailable)
 		return
 	}
 	if r.Context().Err() != nil {
@@ -203,18 +216,23 @@ func (s *relay) handleRollback(w http.ResponseWriter, r *http.Request, admin adm
 	if r.Body != nil && r.ContentLength != 0 {
 		body := http.MaxBytesReader(w, r.Body, 1024)
 		if err := json.NewDecoder(body).Decode(&options); err != nil {
-			http.Error(w, "无效的回滚参数", http.StatusBadRequest)
+			http.Error(w, "无效的操作参数", http.StatusBadRequest)
 			return
 		}
 	}
+	if options.RestoreDatabase && target.Status != "succeeded" {
+		http.Error(w, "仅已上线过的版本包含部署前数据库快照，无法同步回滚数据库", http.StatusBadRequest)
+		return
+	}
 
 	record := target
-	record.ID, record.Kind, record.Status = strings.ToLower(rand.Text()), "rollback", "running"
+	record.ID, record.Kind, record.Format, record.Status = strings.ToLower(rand.Text()), kind, target.effectiveFormat(), "running"
+	record.Message = ""
 	record.Operator, record.Target, record.RestoreDatabase = admin, target.ID, options.RestoreDatabase
 	record.Started, record.Finished = time.Now().UTC(), nil
 	if err := s.history.save(record); err != nil {
-		s.logger.Error("create rollback record", "error", err)
-		http.Error(w, "无法保存回滚记录", http.StatusInternalServerError)
+		s.logger.Error("create activation record", "kind", kind, "error", err)
+		http.Error(w, "无法保存部署记录", http.StatusInternalServerError)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), deployTimeout)

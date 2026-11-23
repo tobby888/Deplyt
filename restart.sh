@@ -27,7 +27,8 @@ pre_switch_db=".db-before-$RUN_ID.sql.gz"
 db_snapshot_ready=0
 
 dropin_dir="/etc/systemd/system/photolib.service.d"
-dropin_file="$dropin_dir/10-deplyt-runtime.conf"
+dropin_file="$dropin_dir/zzz-deplyt-runtime.conf"
+legacy_dropin_file="$dropin_dir/10-deplyt-runtime.conf"
 native_releases_dir="$DEPLOY_DIR/native-releases"
 native_current_link="$DEPLOY_DIR/native-current"
 
@@ -101,7 +102,7 @@ snapshot_database() {
   cnf=$(mktemp "$DEPLOY_DIR/.my-cnf-XXXXXX")
   chmod 600 "$cnf"
   printf '[client]\nhost=%s\nport=%s\nuser=%s\npassword=%s\n' "$DB_HOST" "$DB_PORT" "$DB_USER" "$DB_PASS" >"$cnf"
-  if mysqldump --defaults-extra-file="$cnf" --single-transaction --routines --triggers --hex-blob "$DB_NAME" | gzip -c >"$target_file"; then
+  if mysqldump --defaults-extra-file="$cnf" --no-tablespaces --single-transaction --routines --triggers --hex-blob "$DB_NAME" | gzip -c >"$target_file"; then
     rm -f -- "$cnf"
     chmod 600 "$target_file"
     return 0
@@ -245,16 +246,17 @@ if [[ "$artifact_format" == "native" ]]; then
   ln -sfn "native-releases/$RUN_ID" "$native_current_link"
   chown -h photolib:photolib "$native_current_link"
   mkdir -p "$dropin_dir"
-  tmp_dropin=$(mktemp "$dropin_dir/.10-deplyt-runtime.XXXXXX")
+  tmp_dropin=$(mktemp "$dropin_dir/.zzz-deplyt-runtime.XXXXXX")
   chmod 644 "$tmp_dropin"
   printf '[Service]\nExecStart=\nExecStart=%s/native-current/photolib\n' "$DEPLOY_DIR" >"$tmp_dropin"
   mv -f -- "$tmp_dropin" "$dropin_file"
+  rm -f -- "$legacy_dropin_file"
   tmp_dropin=""
   systemctl daemon-reload
   systemctl start photolib
 else
-  if [[ -f "$dropin_file" ]]; then
-    rm -f -- "$dropin_file"
+  if [[ -f "$dropin_file" || -f "$legacy_dropin_file" ]]; then
+    rm -f -- "$dropin_file" "$legacy_dropin_file"
     systemctl daemon-reload
   fi
   mv -- "$staged" "$artifact_name"

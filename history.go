@@ -26,6 +26,7 @@ var (
 type deployment struct {
 	ID              string        `json:"id"`
 	Kind            string        `json:"kind"`
+	Format          string        `json:"format,omitempty"`
 	Status          string        `json:"status"`
 	Message         string        `json:"message,omitempty"`
 	Name            string        `json:"name"`
@@ -41,6 +42,13 @@ type deployment struct {
 	RestoreDatabase bool          `json:"restoreDatabase,omitempty"`
 	Started         time.Time     `json:"started"`
 	Finished        *time.Time    `json:"finished,omitempty"`
+}
+
+func (d deployment) effectiveFormat() string {
+	if d.Format == artifactFormatNative {
+		return artifactFormatNative
+	}
+	return artifactFormatJAR
 }
 
 type history string
@@ -119,8 +127,9 @@ func (h history) load(id string) (deployment, error) {
 	if err := json.Unmarshal(data, &record); err != nil {
 		return deployment{}, err
 	}
+	format, formatOK := parseArtifactFormat(record.Format)
 	directTransfer := (record.Kind == "oss" || record.Kind == "deploy") && !record.Archived && record.Object == ""
-	if record.ID != id || !jarNamePattern.MatchString(record.Name) ||
+	if record.ID != id || !formatOK || !validArtifactName(format, record.Name) ||
 		!sha256Pattern.MatchString(record.SHA256) || (!directTransfer && record.Object != archivePrefix+record.Name) {
 		return deployment{}, fmt.Errorf("invalid deployment record %s", id)
 	}
@@ -217,12 +226,13 @@ func (s *relay) handleRollback(w http.ResponseWriter, r *http.Request, admin adm
 }
 
 func (s *relay) apply(w http.ResponseWriter, ctx context.Context, record deployment) bool {
-	logger := s.logger.With("deployment_id", record.ID, "run_id", record.Run, "object", record.Object, "restore_db", record.RestoreDatabase)
+	format := record.effectiveFormat()
+	logger := s.logger.With("deployment_id", record.ID, "run_id", record.Run, "object", record.Object, "format", format, "restore_db", record.RestoreDatabase)
 	restoreFrom := ""
 	if record.RestoreDatabase {
 		restoreFrom = record.Target
 	}
-	err := s.activateWithOptions(ctx, artifact{name: record.Name, key: record.Object, sha256: record.SHA256}, record.ID, restoreFrom, logger)
+	err := s.activateWithOptions(ctx, artifact{name: record.Name, format: format, key: record.Object, sha256: record.SHA256}, record.ID, restoreFrom, logger)
 	return s.finishDeployment(w, record, err, logger)
 }
 

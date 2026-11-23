@@ -1,8 +1,10 @@
 package main
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -27,8 +29,9 @@ import (
 )
 
 const (
-	testToken   = "test-deployment-token-with-sufficient-length"
-	testJARName = "photolib-backend-0.1.0-SNAPSHOT.jar"
+	testToken      = "test-deployment-token-with-sufficient-length"
+	testJARName    = "photolib-backend-0.1.0-SNAPSHOT.jar"
+	testNativeName = "photolib-native-linux-x86_64.tar.gz"
 )
 
 func deploymentRequest(data []byte) *http.Request {
@@ -237,6 +240,204 @@ func expectSSHCommand(listener net.Listener, config *ssh.ServerConfig, verify fu
 	}
 	_, err = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 	return err
+}
+
+func makeTestNativeBundle(t *testing.T, entries map[string][]byte, extra func(*tar.Writer)) []byte {
+	t.Helper()
+	if entries == nil {
+		entries = map[string][]byte{
+			"photolib":             append([]byte{0x7f, 'E', 'L', 'F'}, []byte("test-native-elf")...),
+			"libawt.so":            []byte("so-data"),
+			"libawt_headless.so":   []byte("so-data"),
+			"libfontmanager.so":    []byte("so-data"),
+			"libjava.so":           []byte("so-data"),
+			"libjavajpeg.so":       []byte("so-data"),
+			"libjvm.so":            []byte("so-data"),
+			"liblcms.so":           []byte("so-data"),
+			"libmanagement_ext.so": []byte("so-data"),
+		}
+	}
+	var data bytes.Buffer
+	gz := gzip.NewWriter(&data)
+	tw := tar.NewWriter(gz)
+	for name, content := range entries {
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     name,
+			Mode:     0755,
+			Size:     int64(len(content)),
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if extra != nil {
+		extra(tw)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return data.Bytes()
+}
+
+func nativeDeploymentRequest(data []byte, activate bool) *http.Request {
+	request := httptest.NewRequest(http.MethodPost, "/v1/deploy/photolib", bytes.NewReader(data))
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	request.Header.Set("X-Artifact-Name", testNativeName)
+	request.Header.Set("X-Artifact-Format", artifactFormatNative)
+	request.Header.Set("X-Artifact-SHA256", fmt.Sprintf("%x", sha256.Sum256(data)))
+	request.Header.Set("X-Deploy-Run-ID", "12345")
+	request.Header.Set("X-Deploy-Commit", strings.Repeat("b", 40))
+	request.Header.Set("X-Deploy-Activate", strconv.FormatBool(activate))
+	return request
+}
+
+func TestRelayRejectsInvalidNativeUploads(t *testing.T) {
+	validBundle := makeTestNativeBundle(t, nil, nil)
+	nonELF := makeTestNativeBundle(t, map[string][]byte{
+		"photolib":             []byte("not-an-elf"),
+		"libawt.so":            []byte("so"),
+		"libawt_headless.so":   []byte("so"),
+		"libfontmanager.so":    []byte("so"),
+		"libjava.so":           []byte("so"),
+		"libjavajpeg.so":       []byte("so"),
+		"libjvm.so":            []byte("so"),
+		"liblcms.so":           []byte("so"),
+		"libmanagement_ext.so": []byte("so"),
+	}, nil)
+	missingLib := makeTestNativeBundle(t, map[string][]byte{
+		"photolib":  append([]byte{0x7f, 'E', 'L', 'F'}, []byte("elf")...),
+		"libawt.so": []byte("so"),
+	}, nil)
+	pathTraversal := makeTestNativeBundle(t, nil, func(tw *tar.Writer) {
+		if err := tw.WriteHeader(&tar.Header{Name: "../evil.so", Mode: 0644, Size: 2, Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte("xx")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	symlinkBundle := makeTestNativeBundle(t, nil, func(tw *tar.Writer) {
+		if err := tw.WriteHeader(&tar.Header{Name: "libextra.so", Mode: 0777, Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		req    func() *http.Request
+		status int
+	}{
+		{"invalid format", func() *http.Request {
+			r := nativeDeploymentRequest(validBundle, true)
+			r.Header.Set("X-Artifact-Format", "docker")
+			return r
+		}, http.StatusBadRequest},
+		{"invalid activate flag", func() *http.Request {
+			r := nativeDeploymentRequest(validBundle, true)
+			r.Header.Set("X-Deploy-Activate", "maybe")
+			return r
+		}, http.StatusBadRequest},
+		{"jar name for native format", func() *http.Request {
+			r := nativeDeploymentRequest(validBundle, true)
+			r.Header.Set("X-Artifact-Name", testJARName)
+			return r
+		}, http.StatusBadRequest},
+		{"native name for jar format", func() *http.Request {
+			r := deploymentRequest(validBundle)
+			r.Header.Set("X-Artifact-Name", testNativeName)
+			return r
+		}, http.StatusBadRequest},
+		{"archive-only without OSS credentials", func() *http.Request {
+			return nativeDeploymentRequest(validBundle, false)
+		}, http.StatusServiceUnavailable},
+		{"non-ELF photolib binary", func() *http.Request {
+			return nativeDeploymentRequest(nonELF, true)
+		}, http.StatusUnprocessableEntity},
+		{"missing accompanying shared library", func() *http.Request {
+			return nativeDeploymentRequest(missingLib, true)
+		}, http.StatusUnprocessableEntity},
+		{"path traversal entry in tar", func() *http.Request {
+			return nativeDeploymentRequest(pathTraversal, true)
+		}, http.StatusUnprocessableEntity},
+		{"symlink entry in tar", func() *http.Request {
+			return nativeDeploymentRequest(symlinkBundle, true)
+		}, http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &relay{token: testToken, maxSize: maxJARSize, logger: slog.New(slog.DiscardHandler)}
+			response := httptest.NewRecorder()
+			s.handleDeploy(response, tc.req())
+			if response.Code != tc.status {
+				t.Fatalf("got %d, want %d: %s", response.Code, tc.status, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestRelayArchivesNativeBundleWithoutActivation(t *testing.T) {
+	data := makeTestNativeBundle(t, nil, nil)
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
+	dir := t.TempDir()
+
+	var uploadedKey, uploadedContentType string
+	archiveClient := jarArchive{
+		bucket: "photolib-test",
+		uploadClient: oss.NewClient(oss.LoadDefaultConfig().WithRegion("cn-hangzhou").
+			WithUseAccelerateEndpoint(true).
+			WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test-key", "test-secret")).
+			WithHttpClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil || !bytes.Equal(body, data) {
+					t.Errorf("uploaded body mismatch: %v", err)
+				}
+				uploadedKey = strings.TrimPrefix(r.URL.Path, "/")
+				uploadedContentType = r.Header.Get("Content-Type")
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+			})})),
+	}
+
+	deployCalled := false
+	handler := &relay{
+		token:   testToken,
+		maxSize: maxJARSize,
+		logger:  slog.New(slog.DiscardHandler),
+		history: history(dir),
+		archive: archiveClient.upload,
+		deploy: func(context.Context, artifact, string, string, *slog.Logger) error {
+			deployCalled = true
+			return nil
+		},
+	}
+
+	response := httptest.NewRecorder()
+	handler.handleDeploy(response, nativeDeploymentRequest(data, false))
+	if response.Code != http.StatusOK || response.Body.String() != "PhotoLib artifact archived\n" {
+		t.Fatalf("got %d: %q", response.Code, response.Body.String())
+	}
+	if deployCalled {
+		t.Fatal("archive-only upload should not trigger production deployment")
+	}
+	if uploadedContentType != "application/gzip" ||
+		!strings.HasPrefix(uploadedKey, archivePrefix+"photolib-native-12345-") ||
+		!strings.HasSuffix(uploadedKey, "-"+digest+".tar.gz") {
+		t.Fatalf("unexpected OSS upload metadata: key=%q contentType=%q", uploadedKey, uploadedContentType)
+	}
+
+	records, err := history(dir).list()
+	if err != nil || len(records) != 1 {
+		t.Fatalf("expected 1 archived record, got %d: %v", len(records), err)
+	}
+	rec := records[0]
+	if rec.Format != artifactFormatNative || rec.Status != "archived" || !rec.Archived || rec.Finished == nil ||
+		rec.Object != uploadedKey || rec.OriginalName != testNativeName || rec.SHA256 != digest {
+		t.Fatalf("unexpected archived record: %+v", rec)
+	}
 }
 
 func TestSSHRejectsUntrustedHost(t *testing.T) {

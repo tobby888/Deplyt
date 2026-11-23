@@ -67,11 +67,15 @@ func (a jarArchive) upload(ctx context.Context, key, sha256 string, file *os.Fil
 	if err != nil {
 		return err
 	}
+	contentType := "application/java-archive"
+	if strings.HasSuffix(key, ".tar.gz") {
+		contentType = "application/gzip"
+	}
 	_, err = a.uploadClient.PutObject(ctx, &oss.PutObjectRequest{
 		Bucket:          oss.Ptr(a.bucket),
 		Key:             oss.Ptr(key),
 		ContentLength:   oss.Ptr(info.Size()),
-		ContentType:     oss.Ptr("application/java-archive"),
+		ContentType:     oss.Ptr(contentType),
 		ForbidOverwrite: oss.Ptr("true"),
 		Acl:             oss.ObjectACLPrivate,
 		Metadata:        map[string]string{"sha256": sha256},

@@ -188,12 +188,97 @@ func verifySSHDeployment(listener net.Listener, server *ssh.ServerConfig, digest
 		return err
 	}
 	return expectSSHCommand(listener, server, func(command string, body []byte) error {
-		want := fmt.Sprintf("DEPLOY_DIR='/opt/Photolib' JAR_NAME='%s' RUN_ID='%s' bash -s", jarName, runID)
-		if command != want || string(body) != restartScript {
+		want := fmt.Sprintf("DEPLOY_DIR='/opt/Photolib' ARTIFACT_FORMAT='jar' ARTIFACT_NAME='%s' JAR_NAME='%s' RUN_ID='%s' bash -s", jarName, jarName, runID)
+		if command != want || string(body) != strings.ReplaceAll(restartScript, "\r\n", "\n") {
 			return fmt.Errorf("unexpected restart: %q", command)
 		}
 		return nil
 	})
+}
+
+func TestRelayDeploysNativeBundleThroughSSH(t *testing.T) {
+	data := makeTestNativeBundle(t, nil, nil)
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := &ssh.ServerConfig{NoClientAuth: true}
+	server.AddHostKey(key)
+
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
+	tcp := listener.(*net.TCPListener)
+	_ = tcp.SetDeadline(time.Now().Add(5 * time.Second))
+	result := make(chan error, 1)
+	go func() {
+		var runID, bundleName string
+		if err := expectSSHCommand(listener, server, func(command string, body []byte) error {
+			match := regexp.MustCompile(`\.upload-([A-Za-z0-9-]+)\.tar\.gz`).FindStringSubmatch(command)
+			if len(match) != 2 || !strings.Contains(command, digest) || !strings.Contains(command, "curl -q") {
+				return fmt.Errorf("unexpected native download command: %q", command)
+			}
+			runID = match[1]
+			url, err := strconv.Unquote(strings.TrimSpace(strings.TrimPrefix(string(body), "url = ")))
+			if err != nil || !strings.HasPrefix(url, "https://photolib-test.oss-cn-hangzhou-internal.aliyuncs.com/"+archivePrefix) {
+				return fmt.Errorf("expected presigned native OSS URL on SSH stdin")
+			}
+			bundleName = "photolib-native-12345-" + strings.TrimSuffix(runID, "-1") + "-" + digest + ".tar.gz"
+			if !strings.Contains(url, "/"+archivePrefix+bundleName+"?") {
+				return fmt.Errorf("native download name does not match deployment name: %s", url)
+			}
+			return nil
+		}); err != nil {
+			_ = listener.Close()
+			result <- err
+			return
+		}
+		result <- expectSSHCommand(listener, server, func(command string, body []byte) error {
+			want := fmt.Sprintf("DEPLOY_DIR='/opt/Photolib' ARTIFACT_FORMAT='native' ARTIFACT_NAME='%s' JAR_NAME='%s' RUN_ID='%s' bash -s", bundleName, bundleName, runID)
+			if command != want || string(body) != strings.ReplaceAll(restartScript, "\r\n", "\n") {
+				return fmt.Errorf("unexpected native restart: %q", command)
+			}
+			return nil
+		})
+	}()
+
+	archiveClient := jarArchive{
+		bucket: "photolib-test",
+		uploadClient: oss.NewClient(oss.LoadDefaultConfig().WithRegion("cn-hangzhou").
+			WithUseAccelerateEndpoint(true).
+			WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test-key", "test-secret")).
+			WithHttpClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+			})})),
+		productionClient: oss.NewClient(oss.LoadDefaultConfig().WithRegion("cn-hangzhou").
+			WithEndpoint("https://oss-cn-hangzhou-internal.aliyuncs.com").
+			WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test-key", "test-secret"))),
+	}
+	prod := productionServer{address: listener.Addr().String(), hostKey: key.PublicKey(), user: "root"}
+	handler := &relay{
+		token:       testToken,
+		maxSize:     maxJARSize,
+		logger:      slog.New(slog.DiscardHandler),
+		history:     history(t.TempDir()),
+		archive:     archiveClient.upload,
+		downloadURL: archiveClient.downloadURL,
+		deploy:      prod.deploy,
+	}
+	response := httptest.NewRecorder()
+	handler.handleDeploy(response, nativeDeploymentRequest(data, true))
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || response.Body.String() != "PhotoLib deployed\n" {
+		t.Fatalf("got %d: %q", response.Code, response.Body.String())
+	}
 }
 
 func expectSSHCommand(listener net.Listener, config *ssh.ServerConfig, verify func(string, []byte) error) error {

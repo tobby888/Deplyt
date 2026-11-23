@@ -1,11 +1,35 @@
 set -euo pipefail
 shopt -s nullglob
 cd "$DEPLOY_DIR"
-staged=".upload-$RUN_ID.jar"
+artifact_format="${ARTIFACT_FORMAT:-jar}"
+artifact_name="${ARTIFACT_NAME:-${JAR_NAME:-}}"
+case "$artifact_format" in
+  jar)
+    staged=".upload-$RUN_ID.jar"
+    ;;
+  native)
+    staged=".upload-$RUN_ID.tar.gz"
+    ;;
+  *)
+    echo "不支持的部署制品类型: $artifact_format" >&2
+    exit 1
+    ;;
+esac
+if [[ -z "$artifact_name" ]]; then
+  echo "缺少部署制品名称" >&2
+  rm -f -- "$staged"
+  exit 1
+fi
+
 deployment_id="${DEPLOY_ID:-${RUN_ID%-[0-9]*}}"
 restore_db_from="${RESTORE_DB_FROM:-}"
 pre_switch_db=".db-before-$RUN_ID.sql.gz"
 db_snapshot_ready=0
+
+dropin_dir="/etc/systemd/system/photolib.service.d"
+dropin_file="$dropin_dir/10-deplyt-runtime.conf"
+native_releases_dir="$DEPLOY_DIR/native-releases"
+native_current_link="$DEPLOY_DIR/native-current"
 
 exec 9>.deplyt-switch.lock
 if ! flock -n 9; then
@@ -24,6 +48,15 @@ if [[ -n "$restore_db_from" && ! -f ".db-snapshot-$restore_db_from.sql.gz" ]]; t
   echo "未找到目标版本 ($restore_db_from) 的数据库快照，无法执行数据库同步回滚" >&2
   rm -f -- "$staged"
   exit 1
+fi
+
+prev_mode="jar"
+prev_native_target=""
+if [[ -f "$dropin_file" ]]; then
+  prev_mode="native"
+  if [[ -L "$native_current_link" ]]; then
+    prev_native_target=$(readlink "$native_current_link" || true)
+  fi
 fi
 
 read_env_var() {
@@ -95,8 +128,11 @@ restore_database() {
   return 1
 }
 
-# Keep the previous JAR outside the service's glob until the new one starts.
+# Keep the previous JAR and systemd drop-in outside the active paths until the new service starts.
 backup=".previous-$RUN_ID"
+backup_dropin=".dropin-backup-$RUN_ID.conf"
+new_native_dir=""
+tmp_dropin=""
 maintenance=0
 switching=0
 activated=0
@@ -109,16 +145,46 @@ finish() {
     if (( db_snapshot_ready )) && [[ -f "$pre_switch_db" ]]; then
       restore_database "$pre_switch_db" || echo "警告：回滚发版前数据库快照失败" >&2
     fi
-    if [[ -f "$backup" ]]; then
-      [[ "$JAR_NAME" == "${previous[0]}" ]] || rm -f -- "$JAR_NAME"
-      mv -f -- "$backup" "${previous[0]}" && systemctl start photolib
-    elif (( ${#previous[@]} )); then
+    if [[ "$prev_mode" == "native" ]]; then
+      if [[ "$artifact_format" == "jar" ]]; then
+        rm -f -- "$artifact_name"
+      fi
+      if [[ -f "$backup" ]] && (( ${#previous[@]} )); then
+        mv -f -- "$backup" "${previous[0]}"
+      fi
+      if [[ -f "$backup_dropin" ]]; then
+        mkdir -p "$dropin_dir"
+        cp -f -- "$backup_dropin" "$dropin_file"
+      fi
+      if [[ -n "$prev_native_target" ]]; then
+        ln -sfn "$prev_native_target" "$native_current_link"
+        chown -h photolib:photolib "$native_current_link"
+      fi
+      systemctl daemon-reload
       systemctl start photolib
     else
-      rm -f -- "$JAR_NAME"
+      rm -f -- "$dropin_file"
+      if [[ -z "$prev_native_target" ]]; then
+        rm -f -- "$native_current_link"
+      fi
+      if [[ -f "$backup" ]]; then
+        if [[ "$artifact_format" == "jar" && "$artifact_name" != "${previous[0]}" ]]; then
+          rm -f -- "$artifact_name"
+        fi
+        mv -f -- "$backup" "${previous[0]}" && systemctl daemon-reload && systemctl start photolib
+      elif (( ${#previous[@]} )); then
+        systemctl daemon-reload && systemctl start photolib
+      else
+        if [[ "$artifact_format" == "jar" ]]; then
+          rm -f -- "$artifact_name"
+        fi
+      fi
     fi
   fi
-  rm -f -- "$staged" "$pre_switch_db"
+  if (( ! activated )) && [[ -n "$new_native_dir" ]]; then
+    rm -rf -- "$new_native_dir"
+  fi
+  rm -f -- "$staged" "$pre_switch_db" "$backup_dropin" ${tmp_dropin:+"$tmp_dropin"}
   if (( maintenance )); then
     bash -ic 'maint-off' </dev/null || status=1
   fi
@@ -127,8 +193,27 @@ finish() {
 trap finish EXIT
 trap 'exit 1' HUP INT TERM
 
-chown photolib:photolib "$staged"
-chmod 644 "$staged"
+if [[ "$artifact_format" == "native" ]]; then
+  mkdir -p "$native_releases_dir"
+  chown photolib:photolib "$native_releases_dir"
+  chmod 755 "$native_releases_dir"
+  new_native_dir="$native_releases_dir/$RUN_ID"
+  rm -rf -- "$new_native_dir"
+  mkdir -p "$new_native_dir"
+  tar -xzf "$staged" --no-same-owner --no-same-permissions -C "$new_native_dir"
+  if [[ ! -f "$new_native_dir/photolib" || -L "$new_native_dir/photolib" || ! -s "$new_native_dir/photolib" ]]; then
+    echo "原生发布包缺少有效的 photolib 可执行文件" >&2
+    exit 1
+  fi
+  chown -R photolib:photolib "$new_native_dir"
+  chmod 755 "$new_native_dir"
+  chmod 644 "$new_native_dir"/*.so
+  chmod 755 "$new_native_dir/photolib"
+else
+  chown photolib:photolib "$staged"
+  chmod 644 "$staged"
+fi
+
 # These commands are defined in the SSH user's interactive bash configuration.
 maintenance=1
 bash -ic 'maint-on' </dev/null
@@ -152,8 +237,30 @@ fi
 if (( ${#previous[@]} )); then
   mv -- "${previous[0]}" "$backup"
 fi
-mv -- "$staged" "$JAR_NAME"
-systemctl start photolib
+if [[ -f "$dropin_file" ]]; then
+  cp -p -- "$dropin_file" "$backup_dropin"
+fi
+
+if [[ "$artifact_format" == "native" ]]; then
+  ln -sfn "native-releases/$RUN_ID" "$native_current_link"
+  chown -h photolib:photolib "$native_current_link"
+  mkdir -p "$dropin_dir"
+  tmp_dropin=$(mktemp "$dropin_dir/.10-deplyt-runtime.XXXXXX")
+  chmod 644 "$tmp_dropin"
+  printf '[Service]\nExecStart=\nExecStart=%s/native-current/photolib\n' "$DEPLOY_DIR" >"$tmp_dropin"
+  mv -f -- "$tmp_dropin" "$dropin_file"
+  tmp_dropin=""
+  systemctl daemon-reload
+  systemctl start photolib
+else
+  if [[ -f "$dropin_file" ]]; then
+    rm -f -- "$dropin_file"
+    systemctl daemon-reload
+  fi
+  mv -- "$staged" "$artifact_name"
+  systemctl start photolib
+fi
+
 sleep 10
 if ! systemctl is-active --quiet photolib; then
   journalctl -u photolib -n 80 --no-pager >&2 || true
@@ -163,4 +270,14 @@ activated=1
 if (( db_snapshot_ready )) && [[ -f "$pre_switch_db" ]]; then
   mv -f -- "$pre_switch_db" ".db-snapshot-$deployment_id.sql.gz"
 fi
-rm -f -- "$backup"
+rm -f -- "$backup" "$backup_dropin"
+if [[ "$artifact_format" == "native" ]]; then
+  for old_dir in "$native_releases_dir"/*; do
+    if [[ "$old_dir" != "$new_native_dir" ]]; then
+      rm -rf -- "$old_dir"
+    fi
+  done
+else
+  rm -f -- "$native_current_link"
+  rm -rf -- "$native_releases_dir"
+fi

@@ -40,17 +40,22 @@ func (p productionServer) deploy(ctx context.Context, jar artifact, stageID, dow
 func (p productionServer) deployWithOptions(ctx context.Context, jar artifact, stageID, downloadURL, restoreDBFrom string, logger *slog.Logger) error {
 	// The presigned URL is sent over SSH stdin, outside the command, curl arguments, and logs.
 	curlConfig := fmt.Sprintf("url = %q\n", downloadURL)
+	format := jar.effectiveFormat()
+	stagedExt := ".jar"
+	if format == artifactFormatNative {
+		stagedExt = ".tar.gz"
+	}
 	for attempt := 1; ; attempt++ {
 		// An earlier attempt may still be terminating on the server after a timeout.
 		// Each attempt uses its own path so that it cannot overwrite the next one.
 		runID := fmt.Sprintf("%s-%d", stageID, attempt)
-		stagedPath := fmt.Sprintf("%s/.upload-%s.jar", productionDir, runID)
+		stagedPath := fmt.Sprintf("%s/.upload-%s%s", productionDir, runID, stagedExt)
 		command := fmt.Sprintf(`curl -q --silent --fail --proto '=https' --connect-timeout 20 --max-time 660 --config - --output '%s' || { echo 'OSS download failed' >&2; exit 1; }`,
 			stagedPath)
 		var input io.Reader = strings.NewReader(curlConfig)
 		if jar.file != nil {
 			if _, err := jar.file.Seek(0, io.SeekStart); err != nil {
-				return fmt.Errorf("rewind staged JAR: %w", err)
+				return fmt.Errorf("rewind staged artifact: %w", err)
 			}
 			command, input = "cat > '"+stagedPath+"'", jar.file
 		}
@@ -58,25 +63,27 @@ func (p productionServer) deployWithOptions(ctx context.Context, jar artifact, s
 			command, jar.sha256, stagedPath)
 		output, err := p.run(ctx, sshTransferTimeout, command, input)
 		if err == nil {
-			logger.Info("production JAR transferred and verified", "attempt", attempt)
-			command := fmt.Sprintf("DEPLOY_DIR='%s' JAR_NAME='%s' RUN_ID='%s' bash -s", productionDir, jar.name, runID)
+			logger.Info("production artifact transferred and verified", "attempt", attempt, "format", format)
+			command := fmt.Sprintf("DEPLOY_DIR='%s' ARTIFACT_FORMAT='%s' ARTIFACT_NAME='%s' JAR_NAME='%s' RUN_ID='%s' bash -s",
+				productionDir, format, jar.name, jar.name, runID)
 			if restoreDBFrom != "" {
-				command = fmt.Sprintf("DEPLOY_DIR='%s' JAR_NAME='%s' RUN_ID='%s' RESTORE_DB_FROM='%s' bash -s",
-					productionDir, jar.name, runID, restoreDBFrom)
+				command = fmt.Sprintf("DEPLOY_DIR='%s' ARTIFACT_FORMAT='%s' ARTIFACT_NAME='%s' JAR_NAME='%s' RUN_ID='%s' RESTORE_DB_FROM='%s' bash -s",
+					productionDir, format, jar.name, jar.name, runID, restoreDBFrom)
 			}
-			output, err := p.run(ctx, sshRestartTimeout, command, strings.NewReader(restartScript))
+			script := strings.ReplaceAll(restartScript, "\r\n", "\n")
+			output, err := p.run(ctx, sshRestartTimeout, command, strings.NewReader(script))
 			if err != nil {
-				return fmt.Errorf("switch JAR and restart photolib: %w; output: %s", err, output)
+				return fmt.Errorf("switch artifact and restart photolib: %w; output: %s", err, output)
 			}
-			logger.Info("production restart completed", "output", output)
+			logger.Info("production restart completed", "output", output, "format", format)
 			return nil
 		}
-		logger.Warn("production JAR transfer or verification failed", "attempt", attempt, "error", err, "output", output)
+		logger.Warn("production artifact transfer or verification failed", "attempt", attempt, "format", format, "error", err, "output", output)
 		if _, err := p.run(ctx, sshConnectTimeout, "rm -f -- '"+stagedPath+"'", nil); err != nil {
-			logger.Warn("remove incomplete production JAR", "path", stagedPath, "error", err)
+			logger.Warn("remove incomplete production artifact", "path", stagedPath, "error", err)
 		}
 		if attempt == sshDownloadAttempts {
-			return fmt.Errorf("transfer and verify JAR after %d attempts: %w", attempt, err)
+			return fmt.Errorf("transfer and verify artifact after %d attempts: %w", attempt, err)
 		}
 		select {
 		case <-ctx.Done():

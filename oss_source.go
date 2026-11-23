@@ -38,7 +38,7 @@ func (s *relay) handleOSS(artifact *ossArtifact, client *http.Client) func(http.
 			http.Error(w, "无法读取 OSS 制品，请查看 Deplyt 日志", http.StatusBadGateway)
 			return
 		}
-		staged, stageErr := stageArtifact(source, artifact.name, artifact.checksum, s.maxSize, logger)
+		staged, stageErr := stageArtifact(source, artifact.name, artifactFormatJAR, artifact.checksum, s.maxSize, logger)
 		_ = source.Close()
 		if stageErr != nil {
 			logger.Warn("validate manual OSS artifact", "error", stageErr)
@@ -46,7 +46,7 @@ func (s *relay) handleOSS(artifact *ossArtifact, client *http.Client) func(http.
 			return
 		}
 		defer staged.remove(logger)
-		if s.publish(w, ctx, staged, "", "", user.administrator) {
+		if s.publish(w, ctx, staged, "", "", user.administrator, true) {
 			w.WriteHeader(http.StatusNoContent)
 		}
 	}

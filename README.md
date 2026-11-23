@@ -51,16 +51,19 @@ curl -fsS http://127.0.0.1:8080/healthz
 | `GITHUB_ACTIONS_TOKEN` | 限定到 PhotoLib 仓库、具有 `Actions: write` 权限的细粒度 PAT。启用控制台的手动工作流。 |
 | `DEPLOY_STATE_DIR` | 部署记录与访问权限目录。systemd 默认使用 `/var/lib/deplyt`，手动运行默认使用当前目录的 `data/`。升级时保留该目录。 |
 
-## OSS 归档与回滚
+## OSS 归档、双模式切换与回滚
 
-配置归档凭据后，CI 和手动 OSS 部署都会将校验通过的 JAR 归档到私有 OSS，随后通过 SSH 让生产机使用签名 URL 下载。生产机会重新校验 SHA-256，再切换 JAR、重启服务并检查 systemd 状态。
+配置归档凭据后，CI 和手动 OSS 部署都会将校验通过的制品归档到私有 OSS，随后通过 SSH 让生产机使用签名 URL 下载。生产机会重新校验 SHA-256，再切换运行制品、重启服务并检查 systemd 状态。
 
 1. 为共享 Bucket 开启[传输加速](https://www.alibabacloud.com/help/en/oss/user-guide/transfer-acceleration)。中转机使用 `<bucket>.oss-accelerate.aliyuncs.com` 上传。部署和回滚的签名下载链接使用 `OSS_PRODUCTION_ENDPOINT` 对应的地址，由生产机访问。同地域的阿里云 ECS 可配置 [OSS 内网 Endpoint](https://help.aliyun.com/en/oss/user-guide/access-oss-via-bucket-domain-name)。
 2. 仅授予 Deplyt 凭据对 `deplyt/photolib/*` 的 `oss:PutObject` 和 `oss:GetObject`。确保 Bucket 生命周期规则对该前缀永久保留，且不会转到需要解冻的存储类型。
-3. 对象键为 `deplyt/photolib/photolib-backend-<run-id>-<部署记录ID>-<完整sha256>.jar`。每次 CI 上传分配独立 ID，重跑也会保留自己的归档。对象按私有 ACL 写入。部署失败或回滚都保留已上传的对象。
-4. 生产机需提供 `curl`、`bash`、`sha256sum`、`flock`、现有的 `maint-on`、`maint-off` 和 `photolib.service`。目录 `/opt/Photolib` 应仅有一个匹配 `photolib-backend-*.jar` 的运行包。切换过程中临时把旧包移出匹配范围，新服务启动失败时尝试恢复旧包。
-5. 控制台可选择曾部署成功的归档，确认后从原对象下载并校验，再执行同一套切换流程。回滚记录保留原 SHA-256、来源提交、运行编号和操作管理员。控制台显示最后确认版本，超时或进程中断后可通过日志核实生产状态。首次上线前的部署没有 Deplyt 记录。
-6. **数据库快照与联动回滚**：每次停机切换前（处于 `maint-on` 维护期内），`restart.sh` 自动从生产目录 `.env` 解析 MySQL 连接信息并生成部署前逻辑快照（`.db-snapshot-<部署ID>.sql.gz`）。若新 JAR 启动或状态检查失败，脚本在自动切回旧 JAR 的同时会自动恢复发版前数据库快照。在控制台执行手动版本回滚时，默认仅回滚 JAR；管理员也可显式勾选「同时回滚数据库到此版本部署前的快照」并输入确认口令，脚本会先将当前数据库备份为 `.db-before-rollback-<运行ID>.sql.gz`，再将数据库与 JAR 同步回滚到目标版本。
+3. 对象键按制品格式区分：
+   - JAR（JVM）：`deplyt/photolib/photolib-backend-<run-id>-<部署记录ID>-<完整sha256>.jar`
+   - 原生镜像（GraalVM Native Image）：`deplyt/photolib/photolib-native-<run-id>-<部署记录ID>-<完整sha256>.tar.gz`（包含 `photolib` Linux x86-64 ELF 可执行文件及伴随 `*.so` 动态库）
+   每次 CI 上传分配独立 ID，重跑也会保留自己的归档。对象按私有 ACL 写入。部署失败或回滚都保留已上传的对象。
+4. 生产机需提供 `curl`、`bash`、`tar`、`sha256sum`、`flock`、现有的 `maint-on`、`maint-off` 和 `photolib.service`。若切换到原生镜像模式，生产机还需具备与构建环境兼容的 glibc、FreeType（`libfreetype6`）及系统字体。切换 JAR 时目录 `/opt/Photolib` 应仅有一个匹配 `photolib-backend-*.jar` 的运行包；切换到原生镜像时，脚本会将发布包解压到 `/opt/Photolib/native-releases/<运行ID>/`、更新 `/opt/Photolib/native-current` 符号链接，并通过 systemd drop-in（`/etc/systemd/system/photolib.service.d/10-deplyt-runtime.conf`）覆盖 `ExecStart`；切回 JAR 时自动移除该 drop-in 恢复原有 JVM 启动参数。任意切换失败都会自动回滚回切换前的运行模式与数据库快照。
+5. 控制台顶部会展示当前生效的部署模式（`JAR (JVM)` 或 `原生镜像 (Native)`），管理员可一键在 JAR 部署与原生部署之间切换，或在发布历史中选择任意已归档版本执行切换或回滚（`POST /api/deployments/{id}/switch`、`POST /api/deployments/{id}/rollback`）。记录保留原 SHA-256、制品格式、来源提交、运行编号和操作管理员。
+6. **数据库快照与联动回滚**：每次停机切换前（处于 `maint-on` 维护期内），`restart.sh` 自动从生产目录 `.env` 解析 MySQL 连接信息并生成部署前逻辑快照（`.db-snapshot-<部署ID>.sql.gz`）。若新版本启动或状态检查失败，脚本在自动切回原运行模式的同时会自动恢复发版前数据库快照。在控制台对曾上线成功的版本执行回滚或切换时，默认仅切换制品；管理员也可显式勾选「同时回滚数据库到此版本部署前的快照」并输入确认口令，脚本会先将当前数据库备份为 `.db-before-rollback-<运行ID>.sql.gz`，再将数据库与制品同步恢复到目标版本。
 
 ## 使用令牌部署 OSS 制品
 
@@ -133,7 +136,7 @@ location = /v1/deploy/photolib {
 }
 ```
 
-部署接口是 `POST /v1/deploy/photolib`，请求体为原始 JAR 字节。请求头包括 `Authorization: Bearer <token>`、`X-Artifact-Name`、`X-Artifact-SHA256` 和 `X-Deploy-Run-ID`。工作流也可传入 `X-Deploy-Commit`，将上传关联到提交 SHA。中转服务单实例串行处理部署，正在处理时的新请求返回 `409`。通过校验的请求会继续执行，即使调用方断开。网络中断时可在 `journalctl -u deplyt` 中用 `run_id` 核实部署结果，再决定是否重跑工作流。
+部署接口是 `POST /v1/deploy/photolib`，请求体为原始 JAR 或原生 `.tar.gz` 发布包字节。请求头包括 `Authorization: Bearer <token>`、`X-Artifact-Name`、`X-Artifact-SHA256`、`X-Deploy-Run-ID`，以及可选的 `X-Artifact-Format`（`jar` 或 `native`，默认 `jar`）、`X-Deploy-Activate`（`true` 或 `false`，默认 `true`；设为 `false` 时仅校验并归档到 OSS，不立即重启生产，供管理员在控制台按需切换）和 `X-Deploy-Commit`（关联提交 SHA）。PhotoLib 的 CI 工作流默认先以 `X-Artifact-Format: jar`、`X-Deploy-Activate: true` 推送并上线 JAR，再以 `X-Artifact-Format: native`、`X-Deploy-Activate: false` 推送原生包归档。中转服务单实例串行处理部署，正在处理时的新请求返回 `409`。通过校验的请求会继续执行，即使调用方断开。网络中断时可在 `journalctl -u deplyt` 中用 `run_id` 核实部署结果，再决定是否重跑工作流。
 
 ## 本地验证
 
